@@ -1,0 +1,6 @@
+folium
+numpy
+pandas
+matplotlib
+ipykernel
+h3
