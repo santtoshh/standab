@@ -1,6 +1,12 @@
+flask>=3.0
+werkzeug>=3.0
+gunicorn>=21.2
 folium
 numpy
 pandas
 matplotlib
 ipykernel
+nbformat
+nbclient
 h3
+scipy

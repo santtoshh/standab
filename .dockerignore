@@ -1,0 +1,32 @@
+# Python cruft
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Local virtualenv - the image installs fresh from requirements.txt
+.venv/
+venv/
+env/
+
+# VCS / IDE / OS
+.git/
+.gitignore
+.cursor/
+.DS_Store
+.Rhistory
+
+# Already-generated outputs & large sample data not needed at runtime
+maps/
+parking_shp/
+validation/
+*.zip
+
+# Per-job tempdirs (never actually live in the repo, but belt-and-braces)
+uploads/
+standab_jupyter/
+standab_ipython/
+
+# Docs
+README_WEBAPP.md

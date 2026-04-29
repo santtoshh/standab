@@ -1,0 +1,648 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Standab · Data Analysis Tool</title>
+  <link rel="icon" type="image/png" href="{{ url_for('static', filename='standab-logo.png') }}">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      /* Neutral slate palette — calm, enterprise, low-contrast */
+      --ink:        #1f2937;   /* slate-800 — body text */
+      --ink-strong: #111827;   /* slate-900 — headings, primary button */
+      --ink-soft:   #374151;   /* slate-700 */
+      --muted:      #6b7280;   /* slate-500 */
+      --muted-soft: #9ca3af;   /* slate-400 */
+      --line:       #e5e7eb;   /* slate-200 */
+      --line-soft:  #eef0f3;
+      --bg:         #ffffff;
+      --bg-soft:    #f8fafc;   /* slate-50 */
+      --bg-panel:   #f9fafb;   /* slate-50 */
+      --accent:     #334155;   /* slate-700 — subtle */
+      --radius:     10px;
+      --radius-sm:  8px;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; }
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
+      color: var(--ink);
+      background: var(--bg-soft);
+      min-height: 100vh;
+      font-size: 14px;
+      line-height: 1.55;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+
+    /* ── Top nav ─────────────────────────────────────── */
+    .nav {
+      background: var(--bg);
+      border-bottom: 1px solid var(--line);
+    }
+    .nav-inner {
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 12px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      text-decoration: none;
+      color: var(--ink-strong);
+    }
+    .brand img {
+      height: 64px;
+      width: auto;
+      display: block;
+    }
+    .brand-sub {
+      font-size: 16px;
+      font-weight: 500;
+      color: var(--ink-soft);
+      padding-left: 18px;
+      border-left: 1px solid var(--line);
+      letter-spacing: -0.005em;
+    }
+    /* ── Page shell ──────────────────────────────────── */
+    .shell {
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 32px 24px 48px;
+    }
+
+    /* ── Page label ──────────────────────────────────── */
+    .page-label {
+      font-size: 12.5px;
+      font-weight: 500;
+      color: var(--muted);
+      margin-bottom: 12px;
+      letter-spacing: 0.01em;
+    }
+
+    /* ── Grid ────────────────────────────────────────── */
+    .grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.8fr);
+      gap: 20px;
+      align-items: stretch;
+    }
+    @media (max-width: 900px) { .grid { grid-template-columns: 1fr; gap: 16px; } }
+
+    .card {
+      background: var(--bg);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 22px 24px;
+      display: flex;
+      flex-direction: column;
+    }
+    .card h2 {
+      margin: 0 0 4px;
+      font-size: 15px;
+      font-weight: 600;
+      letter-spacing: -0.005em;
+      color: var(--ink-strong);
+    }
+    .card p.sub {
+      margin: 0 0 18px;
+      color: var(--muted);
+      font-size: 13.5px;
+    }
+    .card form,
+    .card .card-body {
+      display: flex;
+      flex-direction: column;
+      flex: 1 1 auto;
+    }
+
+    /* ── Form ────────────────────────────────────────── */
+    .op-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr) auto;
+      gap: 10px;
+      align-items: end;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-sm);
+      margin-bottom: 8px;
+      background: var(--bg-panel);
+    }
+    .op-row.single .remove { visibility: hidden; }
+
+    label.lbl {
+      display: block;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      color: var(--muted);
+      margin: 0 0 5px;
+    }
+    input[type=text], input[type=file] {
+      width: 100%;
+      padding: 8px 10px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      font-size: 13.5px;
+      background: #fff;
+      color: var(--ink-strong);
+      font-family: inherit;
+      font-weight: 500;
+      transition: border-color 0.12s, box-shadow 0.12s;
+    }
+    input[type=text]:focus, input[type=file]:focus {
+      outline: none;
+      border-color: #94a3b8;
+      box-shadow: 0 0 0 3px rgba(148,163,184,0.18);
+    }
+    input[type=file] {
+      padding: 6px 10px;
+      cursor: pointer;
+    }
+    input[type=file]::-webkit-file-upload-button {
+      border: 1px solid var(--line);
+      background: #fff;
+      padding: 5px 10px;
+      border-radius: 5px;
+      font-family: inherit;
+      font-weight: 500;
+      font-size: 12.5px;
+      color: var(--ink);
+      cursor: pointer;
+      margin-right: 10px;
+      transition: background 0.12s, border-color 0.12s;
+    }
+    input[type=file]::-webkit-file-upload-button:hover {
+      background: var(--bg-soft);
+      border-color: #cbd5e1;
+    }
+
+    .remove {
+      appearance: none;
+      border: 1px solid var(--line);
+      background: #fff;
+      border-radius: 6px;
+      width: 32px; height: 32px;
+      cursor: pointer;
+      font-size: 13px;
+      color: var(--muted);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.12s;
+    }
+    .remove:hover {
+      background: var(--bg-soft);
+      border-color: #cbd5e1;
+      color: var(--ink);
+    }
+
+    .row-actions {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-top: 4px;
+      flex-wrap: wrap;
+    }
+
+    .btn {
+      appearance: none;
+      border: 1px solid transparent;
+      border-radius: 6px;
+      padding: 8px 14px;
+      font-weight: 500;
+      font-size: 13px;
+      cursor: pointer;
+      font-family: inherit;
+      transition: background 0.12s, border-color 0.12s, color 0.12s;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .btn-primary {
+      background: var(--ink-strong);
+      color: #fff;
+      border-color: var(--ink-strong);
+      padding: 10px 16px;
+      font-weight: 500;
+      justify-content: center;
+    }
+    .btn-primary:hover { background: #000; border-color: #000; }
+    .btn-primary[disabled] { opacity: 0.55; cursor: wait; }
+    .btn-block { width: 100%; }
+    .btn-ghost {
+      background: #fff;
+      color: var(--ink-strong);
+      border-color: var(--line);
+    }
+    .btn-ghost:hover { background: var(--bg-soft); border-color: #cbd5e1; }
+
+    .submit-bar {
+      margin-top: auto;
+      padding-top: 18px;
+    }
+
+    /* ── Instructions ────────────────────────────────── */
+    ul.reqs {
+      margin: 0 0 14px;
+      padding: 0;
+      list-style: none;
+    }
+    ul.reqs li {
+      padding: 10px 0;
+      border-bottom: 1px solid var(--line-soft);
+      font-size: 13.5px;
+      line-height: 1.5;
+      color: var(--ink-soft);
+      display: grid;
+      grid-template-columns: 16px 1fr;
+      gap: 10px;
+      align-items: start;
+    }
+    ul.reqs li:last-child { border-bottom: none; padding-bottom: 0; }
+    ul.reqs li:first-child { padding-top: 0; }
+    ul.reqs li .check {
+      width: 14px; height: 14px;
+      margin-top: 4px;
+      border-radius: 50%;
+      border: 1px solid #cbd5e1;
+      color: var(--muted);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 9px;
+      font-weight: 600;
+    }
+    ul.reqs li strong {
+      font-weight: 600;
+      color: var(--ink-strong);
+      display: block;
+      margin-bottom: 2px;
+    }
+    ul.reqs li code {
+      background: var(--bg-soft);
+      border: 1px solid var(--line);
+      padding: 1px 5px;
+      border-radius: 4px;
+      font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+      font-size: 11.5px;
+      color: var(--ink-soft);
+    }
+
+    details.aliases {
+      border: 1px solid var(--line);
+      border-radius: var(--radius-sm);
+      background: var(--bg-panel);
+      margin-top: 10px;
+      overflow: hidden;
+    }
+    details.aliases > summary {
+      cursor: pointer;
+      padding: 10px 14px;
+      font-weight: 500;
+      font-size: 12.5px;
+      color: var(--ink-strong);
+      list-style: none;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      user-select: none;
+    }
+    details.aliases > summary::-webkit-details-marker { display: none; }
+    details.aliases > summary::after {
+      content: '+';
+      font-size: 15px;
+      font-weight: 400;
+      color: var(--muted);
+    }
+    details.aliases[open] > summary::after { content: '−'; }
+    details.aliases > summary:hover { background: #f1f5f9; }
+    details.aliases .inner {
+      padding: 2px 14px 12px;
+      border-top: 1px solid var(--line);
+    }
+    details.aliases table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+      margin-top: 8px;
+    }
+    details.aliases td {
+      padding: 6px 0;
+      border-top: 1px solid var(--line-soft);
+      vertical-align: top;
+    }
+    details.aliases tr:first-child td { border-top: none; }
+    details.aliases td.k {
+      font-weight: 500;
+      color: var(--ink-strong);
+      white-space: nowrap;
+      width: 40%;
+      padding-right: 10px;
+    }
+    details.aliases td.v {
+      color: var(--muted);
+      font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+      font-size: 11px;
+      line-height: 1.55;
+      word-break: break-word;
+    }
+
+    /* ── Footer ──────────────────────────────────────── */
+    footer.foot {
+      max-width: 1120px;
+      margin: 24px auto 0;
+      padding: 14px 24px 24px;
+      border-top: 1px solid var(--line);
+      font-size: 11.5px;
+      color: var(--muted-soft);
+    }
+
+    /* ── Loading overlay ─────────────────────────────── */
+    .spinner-wrap {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(248,250,252,0.92);
+      backdrop-filter: blur(6px);
+      -webkit-backdrop-filter: blur(6px);
+      z-index: 99;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+      gap: 14px;
+      color: var(--ink-strong);
+      text-align: center;
+      padding: 24px;
+    }
+    .spinner-wrap.on { display: flex; }
+    .spinner-wrap img { height: 56px; opacity: 0.95; margin-bottom: 8px; }
+    .spinner {
+      width: 28px; height: 28px;
+      border-radius: 50%;
+      border: 2px solid #e2e8f0;
+      border-top-color: var(--ink-strong);
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spinner-wrap .msg {
+      font-weight: 600;
+      font-size: 14.5px;
+    }
+    .spinner-wrap .elapsed {
+      font-variant-numeric: tabular-nums;
+      font-size: 12.5px;
+      font-weight: 500;
+      color: var(--muted);
+      letter-spacing: 0.01em;
+    }
+    .spinner-wrap .sub {
+      color: var(--muted);
+      font-size: 12.5px;
+      max-width: 420px;
+      line-height: 1.55;
+    }
+  </style>
+</head>
+<body>
+
+  <nav class="nav">
+    <div class="nav-inner">
+      <a href="/" class="brand">
+        <img src="{{ url_for('static', filename='standab-logo.png') }}" alt="Standab">
+        <span class="brand-sub">Data Analysis Tool</span>
+      </a>
+    </div>
+  </nav>
+
+  <main class="shell">
+
+    <div class="page-label">New analysis</div>
+
+    <div class="grid">
+
+      <section class="card" aria-labelledby="upload-title">
+        <h2 id="upload-title">Upload ride data</h2>
+        <p class="sub">Add one row per operator. For multi-operator analysis, add a row for each. The report will include per-operator results and a combined bundle with a built-in dataset toggle.</p>
+
+        <form id="uploadForm" action="/generate" method="post" enctype="multipart/form-data">
+          <div id="opRows"></div>
+
+          <div class="row-actions">
+            <button type="button" class="btn btn-ghost" id="addOpBtn">
+              <span style="font-size:14px; line-height:1;">+</span> Add another operator
+            </button>
+          </div>
+
+          <div class="submit-bar">
+            <button type="submit" class="btn btn-primary btn-block" id="submitBtn">
+              Generate report
+              <span aria-hidden="true">→</span>
+            </button>
+          </div>
+        </form>
+      </section>
+
+      <aside class="card" aria-labelledby="instr-title">
+        <h2 id="instr-title">Data requirements</h2>
+        <p class="sub">One row per ride. Column names are flexible. Common aliases are auto-detected across operators.</p>
+        <div class="card-body">
+
+        <ul class="reqs">
+          <li>
+            <span class="check">✓</span>
+            <span>
+              <strong>Vehicle identifier</strong>
+              <code>vehicle_id</code>
+            </span>
+          </li>
+          <li>
+            <span class="check">✓</span>
+            <span>
+              <strong>Ride start &amp; end timestamps</strong>
+              ISO&nbsp;8601 or <code>YYYY-MM-DD HH:MM:SS UTC</code>
+            </span>
+          </li>
+          <li>
+            <span class="check">✓</span>
+            <span>
+              <strong>Ride start &amp; end coordinates</strong>
+              WGS-84 decimal degrees as <code>start_lat</code>/<code>start_lng</code>/<code>end_lat</code>/<code>end_lng</code>, or GeoJSON <code>start_loc</code>/<code>end_loc</code>
+            </span>
+          </li>
+        </ul>
+
+        <details class="aliases">
+          <summary>Accepted column aliases</summary>
+          <div class="inner">
+            <table>
+              <tr><td class="k">vehicle_id</td><td class="v">vehicle_id · vehicleid · vehicle · scooter_id · bike_id · vehicle_identifier</td></tr>
+              <tr><td class="k">start_time</td><td class="v">start_time · start_date · started_at · time_ride_start · time_ride_start_local · start_datetime · starttime</td></tr>
+              <tr><td class="k">end_time</td><td class="v">end_time · end_date · ended_at · time_ride_end · time_ride_end_local · end_datetime · endtime</td></tr>
+              <tr><td class="k">start_lat / start_lng</td><td class="v">start_lat/lng · vehicle_start_latitude/longitude · pickup_lat/lng · start_latitude/longitude · lat_start / lng_start</td></tr>
+              <tr><td class="k">end_lat / end_lng</td><td class="v">end_lat/lng · vehicle_end_latitude/longitude · dropoff_lat/lng · end_latitude/longitude · lat_end / lng_end</td></tr>
+              <tr><td class="k">start_loc / end_loc</td><td class="v">GeoJSON string or dict with <code>coordinates: [lng, lat]</code></td></tr>
+            </table>
+          </div>
+        </details>
+
+        </div>
+      </aside>
+
+    </div>
+
+  </main>
+
+  <footer class="foot">
+    © Standab 2026
+  </footer>
+
+  <div class="spinner-wrap" id="spinner" role="status" aria-live="polite">
+    <img src="{{ url_for('static', filename='standab-logo.png') }}" alt="Standab">
+    <div class="spinner" aria-hidden="true"></div>
+    <div class="msg">Generating your report</div>
+    <div class="elapsed" id="elapsed">0s elapsed</div>
+    <div class="sub">This can take anywhere from a few seconds to a couple of minutes depending on dataset size. The HTML report will download automatically when it is ready.</div>
+  </div>
+
+  <script>
+    (function() {
+      const rowsEl = document.getElementById('opRows');
+      const addBtn = document.getElementById('addOpBtn');
+      const form = document.getElementById('uploadForm');
+      const submitBtn = document.getElementById('submitBtn');
+      const spinner = document.getElementById('spinner');
+
+      function renderRow(defaultName) {
+        const row = document.createElement('div');
+        row.className = 'op-row';
+        row.innerHTML = `
+          <div>
+            <label class="lbl">Operator</label>
+            <input type="text" name="operator_name" placeholder="e.g. Voi" value="${defaultName || ''}" autocomplete="off" />
+          </div>
+          <div>
+            <label class="lbl">Rides CSV</label>
+            <input type="file" name="operator_csv" accept=".csv,text/csv" required />
+          </div>
+          <button type="button" class="remove" title="Remove this operator" aria-label="Remove">✕</button>
+        `;
+        row.querySelector('.remove').addEventListener('click', () => {
+          row.remove();
+          updateSoloState();
+        });
+        rowsEl.appendChild(row);
+        updateSoloState();
+      }
+
+      function updateSoloState() {
+        const rows = rowsEl.querySelectorAll('.op-row');
+        rows.forEach(r => r.classList.toggle('single', rows.length === 1));
+      }
+
+      addBtn.addEventListener('click', () => renderRow());
+
+      const elapsedEl = document.getElementById('elapsed');
+      let elapsedTimer = null;
+
+      function formatElapsed(seconds) {
+        if (seconds < 60) return seconds + 's elapsed';
+        const m = Math.floor(seconds / 60);
+        const s = seconds % 60;
+        return m + 'm ' + String(s).padStart(2, '0') + 's elapsed';
+      }
+
+      function startElapsed() {
+        const startedAt = Date.now();
+        elapsedEl.textContent = '0s elapsed';
+        elapsedTimer = setInterval(() => {
+          const secs = Math.floor((Date.now() - startedAt) / 1000);
+          elapsedEl.textContent = formatElapsed(secs);
+        }, 1000);
+      }
+
+      function stopElapsed() {
+        if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
+      }
+
+      function showOverlay() {
+        submitBtn.disabled = true;
+        submitBtn.innerHTML = 'Generating… <span aria-hidden="true">⏳</span>';
+        spinner.classList.add('on');
+        startElapsed();
+      }
+
+      function hideOverlay() {
+        stopElapsed();
+        submitBtn.disabled = false;
+        submitBtn.innerHTML = 'Generate report <span aria-hidden="true">→</span>';
+        spinner.classList.remove('on');
+      }
+
+      function filenameFromHeader(header, fallback) {
+        if (!header) return fallback;
+        const m = /filename\*=UTF-8''([^;]+)|filename="?([^";]+)"?/i.exec(header);
+        try {
+          return decodeURIComponent(m && (m[1] || m[2])) || fallback;
+        } catch (_) {
+          return (m && (m[1] || m[2])) || fallback;
+        }
+      }
+
+      function triggerDownload(blob, filename) {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 2000);
+      }
+
+      form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        showOverlay();
+
+        try {
+          const response = await fetch(form.action, {
+            method: 'POST',
+            body: new FormData(form),
+          });
+
+          if (!response.ok) {
+            // Server rendered error.html (500) — replace the page with it so the
+            // user sees the traceback and can go back to the upload form.
+            const html = await response.text();
+            document.open();
+            document.write(html);
+            document.close();
+            return;
+          }
+
+          const blob = await response.blob();
+          const filename = filenameFromHeader(
+            response.headers.get('Content-Disposition'),
+            'standab-analysis.html'
+          );
+          triggerDownload(blob, filename);
+          hideOverlay();
+        } catch (err) {
+          hideOverlay();
+          alert('Failed to generate report: ' + (err && err.message ? err.message : err));
+        }
+      });
+
+      renderRow();
+    })();
+  </script>
+</body>
+</html>
