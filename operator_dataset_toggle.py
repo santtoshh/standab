@@ -13,6 +13,126 @@ import numpy as np
 import pandas as pd
 
 
+RENAME_DIRECT: dict[str, str] = {
+    "vehicle_start_latitude": "start_lat",
+    "vehicle_start_longitude": "start_lng",
+    "vehicle_end_latitude": "end_lat",
+    "vehicle_end_longitude": "end_lng",
+    "start_date": "start_time",
+    "end_date": "end_time",
+}
+
+VEHICLE_ID_ALIASES: list[str] = [
+    "vehicle_id",
+    "vehicleid",
+    "vehicle",
+    "scooter_id",
+    "bike_id",
+    "vehicle_identifier",
+]
+
+START_TIME_ALIASES: list[str] = [
+    "start_time",
+    "start_time_local",
+    "start_date",
+    "time_ride_start_local",
+    "time_ride_start",
+    "started_at",
+    "start_datetime",
+    "starttime",
+]
+
+END_TIME_ALIASES: list[str] = [
+    "end_time",
+    "end_time_local",
+    "end_date",
+    "time_ride_end_local",
+    "time_ride_end",
+    "ended_at",
+    "end_datetime",
+    "endtime",
+]
+
+START_LAT_ALIASES: list[str] = [
+    "start_lat",
+    "vehicle_start_latitude",
+    "lat_start",
+    "latstart",
+    "start_latitude",
+    "startlatitude",
+    "pickup_lat",
+    "latpickup",
+]
+
+START_LNG_ALIASES: list[str] = [
+    "start_lng",
+    "start_lon",
+    "vehicle_start_longitude",
+    "start_long",
+    "lng_start",
+    "lngstart",
+    "start_longitude",
+    "startlongitude",
+    "pickup_lng",
+    "lon_start",
+    "lngpickup",
+]
+
+END_LAT_ALIASES: list[str] = [
+    "end_lat",
+    "vehicle_end_latitude",
+    "lat_end",
+    "latend",
+    "end_latitude",
+    "endlatitude",
+    "dropoff_lat",
+    "latdropoff",
+]
+
+END_LNG_ALIASES: list[str] = [
+    "end_lng",
+    "end_lon",
+    "vehicle_end_longitude",
+    "end_long",
+    "lng_end",
+    "lngend",
+    "end_longitude",
+    "endlongitude",
+    "dropoff_lng",
+    "lon_end",
+    "lngdropoff",
+]
+
+START_H3_ALIASES: list[str] = ["start_h3", "start_loc_h3_9", "start_h3_9"]
+END_H3_ALIASES: list[str] = ["end_h3", "end_loc_h3_9", "end_h3_9"]
+
+START_LOC_ALIASES: list[str] = ["start_loc", "start_location", "start_geojson"]
+END_LOC_ALIASES: list[str] = ["end_loc", "end_location", "end_geojson"]
+
+CANONICAL_FIELD_ALIASES: dict[str, list[str]] = {
+    "vehicle_id": VEHICLE_ID_ALIASES,
+    "start_time": START_TIME_ALIASES,
+    "end_time": END_TIME_ALIASES,
+    "start_lat": START_LAT_ALIASES,
+    "start_lng": START_LNG_ALIASES,
+    "end_lat": END_LAT_ALIASES,
+    "end_lng": END_LNG_ALIASES,
+    "start_loc": START_LOC_ALIASES,
+    "end_loc": END_LOC_ALIASES,
+    "start_h3": START_H3_ALIASES,
+    "end_h3": END_H3_ALIASES,
+}
+
+REQUIRED_BASE_FIELDS: tuple[str, ...] = ("vehicle_id", "start_time", "end_time")
+REQUIRED_LATLNG_FIELDS: tuple[str, ...] = (
+    "start_lat",
+    "start_lng",
+    "end_lat",
+    "end_lng",
+)
+REQUIRED_GEOJSON_FIELDS: tuple[str, ...] = ("start_loc", "end_loc")
+
+
 def _pick_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
     for col in candidates:
         if col in df.columns:
@@ -51,15 +171,7 @@ def standardize_rides_dataframe(df_rides: pd.DataFrame) -> pd.DataFrame:
         .str.replace(" ", "_", regex=False)
     )
 
-    rename_direct = {
-        "vehicle_start_latitude": "start_lat",
-        "vehicle_start_longitude": "start_lng",
-        "vehicle_end_latitude": "end_lat",
-        "vehicle_end_longitude": "end_lng",
-        "start_date": "start_time",
-        "end_date": "end_time",
-    }
-    for src, dst in rename_direct.items():
+    for src, dst in RENAME_DIRECT.items():
         if src in df.columns and dst not in df.columns:
             df = df.rename(columns={src: dst})
 
@@ -77,103 +189,15 @@ def standardize_rides_dataframe(df_rides: pd.DataFrame) -> pd.DataFrame:
         df["end_lat"] = end_coords.apply(lambda x: x[0])
         df["end_lng"] = end_coords.apply(lambda x: x[1])
 
-    vehicle_id = _pick_col(
-        df,
-        [
-            "vehicle_id",
-            "vehicleid",
-            "vehicle",
-            "scooter_id",
-            "bike_id",
-            "vehicle_identifier",
-        ],
-    )
-    start_time = _pick_col(
-        df,
-        [
-            "start_time",
-            "start_time_local",
-            "start_date",
-            "time_ride_start_local",
-            "time_ride_start",
-            "started_at",
-            "start_datetime",
-            "starttime",
-        ],
-    )
-    end_time = _pick_col(
-        df,
-        [
-            "end_time",
-            "end_time_local",
-            "end_date",
-            "time_ride_end_local",
-            "time_ride_end",
-            "ended_at",
-            "end_datetime",
-            "endtime",
-        ],
-    )
-    start_lat = _pick_col(
-        df,
-        [
-            "start_lat",
-            "vehicle_start_latitude",
-            "lat_start",
-            "latstart",
-            "start_latitude",
-            "startlatitude",
-            "pickup_lat",
-            "latpickup",
-        ],
-    )
-    start_lng = _pick_col(
-        df,
-        [
-            "start_lng",
-            "start_lon",
-            "vehicle_start_longitude",
-            "start_long",
-            "lng_start",
-            "lngstart",
-            "start_longitude",
-            "startlongitude",
-            "pickup_lng",
-            "lon_start",
-            "lngpickup",
-        ],
-    )
-    end_lat = _pick_col(
-        df,
-        [
-            "end_lat",
-            "vehicle_end_latitude",
-            "lat_end",
-            "latend",
-            "end_latitude",
-            "endlatitude",
-            "dropoff_lat",
-            "latdropoff",
-        ],
-    )
-    end_lng = _pick_col(
-        df,
-        [
-            "end_lng",
-            "end_lon",
-            "vehicle_end_longitude",
-            "end_long",
-            "lng_end",
-            "lngend",
-            "end_longitude",
-            "endlongitude",
-            "dropoff_lng",
-            "lon_end",
-            "lngdropoff",
-        ],
-    )
-    start_h3 = _pick_col(df, ["start_h3", "start_loc_h3_9", "start_h3_9"])
-    end_h3 = _pick_col(df, ["end_h3", "end_loc_h3_9", "end_h3_9"])
+    vehicle_id = _pick_col(df, VEHICLE_ID_ALIASES)
+    start_time = _pick_col(df, START_TIME_ALIASES)
+    end_time = _pick_col(df, END_TIME_ALIASES)
+    start_lat = _pick_col(df, START_LAT_ALIASES)
+    start_lng = _pick_col(df, START_LNG_ALIASES)
+    end_lat = _pick_col(df, END_LAT_ALIASES)
+    end_lng = _pick_col(df, END_LNG_ALIASES)
+    start_h3 = _pick_col(df, START_H3_ALIASES)
+    end_h3 = _pick_col(df, END_H3_ALIASES)
 
     rename_map = {}
     if vehicle_id and vehicle_id != "vehicle_id":

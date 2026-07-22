@@ -20,10 +20,29 @@ RUN apt-get update \
 
 WORKDIR /app
 
+# Make pip resilient to slow/flaky PyPI reads on the build network.
+# Railway's builder intermittently drops download streams mid-file
+# (ReadTimeout / IncompleteRead). We combat this three ways:
+#   * PIP_DEFAULT_TIMEOUT/PIP_RETRIES  - longer per-read timeout + connection retries
+#   * --resume-retries                 - resume a download that broke mid-stream
+#   * an outer retry loop              - re-run the whole install on any failure
+ENV PIP_DEFAULT_TIMEOUT=120 \
+    PIP_RETRIES=10
+
 COPY requirements.txt ./
-RUN pip install --upgrade pip \
-    && pip install -r requirements.txt \
-    && pip install "gunicorn>=21.2"
+RUN pip install --upgrade pip
+RUN set -e; \
+    for i in 1 2 3 4 5; do \
+      echo "=== pip install attempt $i/5 ==="; \
+      if pip install --retries 10 --timeout 120 --resume-retries 5 \
+           -r requirements.txt "gunicorn>=21.2"; then \
+        echo "pip install succeeded"; \
+        break; \
+      fi; \
+      if [ "$i" = "5" ]; then echo "pip install failed after 5 attempts"; exit 1; fi; \
+      echo "attempt $i failed; retrying in 10s..."; \
+      sleep 10; \
+    done
 
 # Copy the rest of the project. .dockerignore excludes heavy/irrelevant files.
 COPY . .

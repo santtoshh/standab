@@ -10,18 +10,23 @@
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <style>
     :root {
-      /* Neutral slate palette — calm, enterprise, low-contrast */
-      --ink:        #1f2937;   /* slate-800 — body text */
-      --ink-strong: #111827;   /* slate-900 — headings, primary button */
-      --ink-soft:   #374151;   /* slate-700 */
-      --muted:      #6b7280;   /* slate-500 */
-      --muted-soft: #9ca3af;   /* slate-400 */
-      --line:       #e5e7eb;   /* slate-200 */
+      --ink:        #1f2937;
+      --ink-strong: #111827;
+      --ink-soft:   #374151;
+      --muted:      #6b7280;
+      --muted-soft: #9ca3af;
+      --line:       #e5e7eb;
       --line-soft:  #eef0f3;
       --bg:         #ffffff;
-      --bg-soft:    #f8fafc;   /* slate-50 */
-      --bg-panel:   #f9fafb;   /* slate-50 */
-      --accent:     #334155;   /* slate-700 — subtle */
+      --bg-soft:    #f8fafc;
+      --bg-panel:   #f9fafb;
+      --accent:     #334155;
+      --good:       #047857;
+      --good-bg:    #ecfdf5;
+      --warn:       #b45309;
+      --warn-bg:    #fffbeb;
+      --bad:        #b91c1c;
+      --bad-bg:     #fef2f2;
       --radius:     10px;
       --radius-sm:  8px;
     }
@@ -38,7 +43,6 @@
       -moz-osx-font-smoothing: grayscale;
     }
 
-    /* ── Top nav ─────────────────────────────────────── */
     .nav {
       background: var(--bg);
       border-bottom: 1px solid var(--line);
@@ -71,23 +75,31 @@
       border-left: 1px solid var(--line);
       letter-spacing: -0.005em;
     }
-    /* ── Page shell ──────────────────────────────────── */
+
     .shell {
       max-width: 1120px;
       margin: 0 auto;
       padding: 32px 24px 48px;
     }
 
-    /* ── Page label ──────────────────────────────────── */
     .page-label {
       font-size: 12.5px;
       font-weight: 500;
       color: var(--muted);
       margin-bottom: 12px;
       letter-spacing: 0.01em;
+      display: flex;
+      align-items: center;
+      gap: 10px;
     }
+    .page-label .step-dot {
+      width: 6px; height: 6px; border-radius: 50%;
+      background: var(--muted-soft);
+      display: inline-block;
+    }
+    .page-label .step-dot.on { background: var(--ink-strong); }
+    .page-label .step-sep { color: var(--muted-soft); }
 
-    /* ── Grid ────────────────────────────────────────── */
     .grid {
       display: grid;
       grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.8fr);
@@ -123,7 +135,6 @@
       flex: 1 1 auto;
     }
 
-    /* ── Form ────────────────────────────────────────── */
     .op-row {
       display: grid;
       grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr) auto;
@@ -145,7 +156,7 @@
       color: var(--muted);
       margin: 0 0 5px;
     }
-    input[type=text], input[type=file] {
+    input[type=text], input[type=file], select {
       width: 100%;
       padding: 8px 10px;
       border: 1px solid var(--line);
@@ -157,7 +168,7 @@
       font-weight: 500;
       transition: border-color 0.12s, box-shadow 0.12s;
     }
-    input[type=text]:focus, input[type=file]:focus {
+    input[type=text]:focus, input[type=file]:focus, select:focus {
       outline: none;
       border-color: #94a3b8;
       box-shadow: 0 0 0 3px rgba(148,163,184,0.18);
@@ -182,6 +193,14 @@
     input[type=file]::-webkit-file-upload-button:hover {
       background: var(--bg-soft);
       border-color: #cbd5e1;
+    }
+    select {
+      appearance: none;
+      -webkit-appearance: none;
+      background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' stroke='%236b7280' stroke-width='1.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+      background-repeat: no-repeat;
+      background-position: right 10px center;
+      padding-right: 28px;
     }
 
     .remove {
@@ -222,7 +241,7 @@
       font-size: 13px;
       cursor: pointer;
       font-family: inherit;
-      transition: background 0.12s, border-color 0.12s, color 0.12s;
+      transition: background 0.12s, border-color 0.12s, color 0.12s, opacity 0.12s;
       display: inline-flex;
       align-items: center;
       gap: 6px;
@@ -236,7 +255,7 @@
       justify-content: center;
     }
     .btn-primary:hover { background: #000; border-color: #000; }
-    .btn-primary[disabled] { opacity: 0.55; cursor: wait; }
+    .btn-primary[disabled] { opacity: 0.5; cursor: not-allowed; }
     .btn-block { width: 100%; }
     .btn-ghost {
       background: #fff;
@@ -250,7 +269,6 @@
       padding-top: 18px;
     }
 
-    /* ── Instructions ────────────────────────────────── */
     ul.reqs {
       margin: 0 0 14px;
       padding: 0;
@@ -356,7 +374,248 @@
       word-break: break-word;
     }
 
-    /* ── Footer ──────────────────────────────────────── */
+    /* ── Mapping (step 2) ────────────────────────────── */
+    .map-card {
+      background: var(--bg);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 22px 24px;
+      margin-bottom: 18px;
+    }
+    .map-head {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      align-items: center;
+      justify-content: space-between;
+      padding-bottom: 14px;
+      border-bottom: 1px solid var(--line);
+      margin-bottom: 16px;
+    }
+    .map-head .op {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .map-head .op-label {
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      color: var(--muted);
+      text-transform: uppercase;
+    }
+    .map-head .op-name input {
+      width: auto;
+      min-width: 160px;
+      padding: 6px 10px;
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--ink-strong);
+    }
+    .map-head .file-meta {
+      font-size: 12.5px;
+      color: var(--muted);
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+    .map-head .file-meta code {
+      background: var(--bg-soft);
+      border: 1px solid var(--line);
+      padding: 2px 7px;
+      border-radius: 4px;
+      font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+      font-size: 11.5px;
+      color: var(--ink-strong);
+    }
+    .map-warn {
+      background: var(--warn-bg);
+      border: 1px solid #fde68a;
+      color: var(--warn);
+      padding: 10px 12px;
+      border-radius: var(--radius-sm);
+      font-size: 12.5px;
+      margin-bottom: 14px;
+    }
+    .map-warn ul { margin: 4px 0 0; padding-left: 18px; }
+
+    .map-mode {
+      display: flex;
+      gap: 6px;
+      margin-bottom: 14px;
+      padding: 4px;
+      background: var(--bg-soft);
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      width: fit-content;
+    }
+    .map-mode label {
+      cursor: pointer;
+      padding: 6px 14px;
+      border-radius: 999px;
+      font-size: 12.5px;
+      font-weight: 500;
+      color: var(--muted);
+      transition: background 0.12s, color 0.12s;
+    }
+    .map-mode input { display: none; }
+    .map-mode input:checked + label {
+      background: var(--bg);
+      color: var(--ink-strong);
+      box-shadow: 0 1px 2px rgba(15,23,42,0.06);
+    }
+
+    .map-fields {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px 14px;
+    }
+    @media (max-width: 720px) { .map-fields { grid-template-columns: 1fr; } }
+    .map-field {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .map-field .field-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .map-field .field-name {
+      font-size: 12.5px;
+      font-weight: 600;
+      color: var(--ink-strong);
+    }
+    .map-field .field-name .req {
+      color: var(--bad);
+      margin-left: 3px;
+    }
+    .map-field .pill {
+      font-size: 10.5px;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      padding: 2px 8px;
+      border-radius: 999px;
+      border: 1px solid transparent;
+    }
+    .pill-good { background: var(--good-bg); border-color: #a7f3d0; color: var(--good); }
+    .pill-warn { background: var(--warn-bg); border-color: #fde68a; color: var(--warn); }
+    .pill-bad  { background: var(--bad-bg);  border-color: #fecaca; color: var(--bad); }
+
+    .preview-wrap {
+      margin-top: 16px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-sm);
+      overflow: hidden;
+    }
+    .preview-head {
+      padding: 8px 12px;
+      background: var(--bg-soft);
+      border-bottom: 1px solid var(--line);
+      font-size: 11.5px;
+      font-weight: 600;
+      color: var(--muted);
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    .preview-scroll {
+      overflow-x: auto;
+      max-height: 260px;
+    }
+    table.preview {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 11.5px;
+      font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+    }
+    table.preview th {
+      text-align: left;
+      padding: 6px 10px;
+      background: #fff;
+      border-bottom: 1px solid var(--line);
+      color: var(--ink-strong);
+      font-weight: 600;
+      font-size: 11px;
+      letter-spacing: 0.02em;
+      white-space: nowrap;
+      position: sticky;
+      top: 0;
+      z-index: 1;
+    }
+    table.preview td {
+      padding: 6px 10px;
+      border-bottom: 1px solid var(--line-soft);
+      color: var(--ink-soft);
+      white-space: nowrap;
+    }
+    table.preview td.empty { color: var(--muted-soft); font-style: italic; }
+    table.preview tr:last-child td { border-bottom: none; }
+
+    .step-bar {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      margin-top: 4px;
+    }
+
+    .form-error {
+      background: var(--bad-bg);
+      border: 1px solid #fecaca;
+      color: var(--bad);
+      border-radius: var(--radius-sm);
+      padding: 10px 12px;
+      font-size: 13px;
+      margin-bottom: 14px;
+      display: none;
+    }
+    .form-error.on { display: block; }
+
+    /* ── Optional parking slot (step 1) ──────────────── */
+    .parking-slot {
+      margin-top: 14px;
+      padding: 14px 16px;
+      border: 1px dashed #cbd5e1;
+      border-radius: var(--radius-sm);
+      background: var(--bg-panel);
+    }
+    .parking-slot-title {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--ink-strong);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .opt-tag {
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--muted);
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 1px 7px;
+    }
+    .parking-slot-sub {
+      font-size: 12.5px;
+      color: var(--muted);
+      margin: 4px 0 12px;
+    }
+    .parking-slot-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr);
+      gap: 10px;
+      align-items: end;
+    }
+    @media (max-width: 720px) { .parking-slot-grid { grid-template-columns: 1fr; } }
+
+    .hidden { display: none !important; }
+
     footer.foot {
       max-width: 1120px;
       margin: 24px auto 0;
@@ -366,7 +625,6 @@
       color: var(--muted-soft);
     }
 
-    /* ── Loading overlay ─────────────────────────────── */
     .spinner-wrap {
       display: none;
       position: fixed;
@@ -425,15 +683,26 @@
 
   <main class="shell">
 
-    <div class="page-label">New analysis</div>
+    <div class="page-label" id="stepLabel">
+      <span>New analysis</span>
+      <span class="step-sep">·</span>
+      <span class="step-dot on" id="stepDot1"></span>
+      <span id="stepLabel1">Upload</span>
+      <span class="step-sep">→</span>
+      <span class="step-dot" id="stepDot2"></span>
+      <span id="stepLabel2">Confirm columns</span>
+    </div>
 
-    <div class="grid">
+    <!-- Step 1: Upload -->
+    <div class="grid" id="stepUpload">
 
       <section class="card" aria-labelledby="upload-title">
         <h2 id="upload-title">Upload ride data</h2>
-        <p class="sub">Add one row per operator. For multi-operator analysis, add a row for each. The report will include per-operator results and a combined bundle with a built-in dataset toggle.</p>
+        <p class="sub">Add one row per operator. CSV or Excel (XLSX) files are accepted. The next page lets you confirm or override how columns map to the canonical schema.</p>
 
-        <form id="uploadForm" action="/generate" method="post" enctype="multipart/form-data">
+        <div class="form-error" id="uploadError"></div>
+
+        <form id="uploadForm" action="/preview" method="post" enctype="multipart/form-data">
           <div id="opRows"></div>
 
           <div class="row-actions">
@@ -442,9 +711,24 @@
             </button>
           </div>
 
+          <div class="parking-slot">
+            <div class="parking-slot-title">Parking hubs <span class="opt-tag">Optional</span></div>
+            <div class="parking-slot-sub">A single overlay of designated parking locations to visually compare against recommended station hexes. CSV or Excel with latitude/longitude columns. Does not affect any metric.</div>
+            <div class="parking-slot-grid">
+              <div>
+                <label class="lbl">Label (optional)</label>
+                <input type="text" name="parking_label" placeholder="e.g. Magdeburg parking" autocomplete="off" />
+              </div>
+              <div>
+                <label class="lbl">Parking file (CSV or XLSX)</label>
+                <input type="file" name="parking_csv" accept=".csv,.xlsx,text/csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" />
+              </div>
+            </div>
+          </div>
+
           <div class="submit-bar">
-            <button type="submit" class="btn btn-primary btn-block" id="submitBtn">
-              Generate report
+            <button type="submit" class="btn btn-primary btn-block" id="uploadSubmitBtn">
+              Continue to column mapping
               <span aria-hidden="true">→</span>
             </button>
           </div>
@@ -453,7 +737,7 @@
 
       <aside class="card" aria-labelledby="instr-title">
         <h2 id="instr-title">Data requirements</h2>
-        <p class="sub">One row per ride. Column names are flexible. Common aliases are auto-detected across operators.</p>
+        <p class="sub">One row per ride. Column names are flexible — common aliases are auto-detected and you'll get a chance to override the mapping on the next page.</p>
         <div class="card-body">
 
         <ul class="reqs">
@@ -499,6 +783,28 @@
 
     </div>
 
+    <!-- Step 2: Confirm column mapping -->
+    <div id="stepMapping" class="hidden">
+      <section class="card" style="margin-bottom:18px;">
+        <h2>Confirm column mapping</h2>
+        <p class="sub">We auto-detected a mapping for each uploaded file. Review every row, override where the column wasn't recognised, and pick a different sheet if your Excel workbook has more than one. Only the canonical fields below are required.</p>
+      </section>
+
+      <div class="form-error" id="mapError"></div>
+
+      <div id="mapList"></div>
+
+      <div class="step-bar">
+        <button type="button" class="btn btn-ghost" id="backBtn">
+          <span aria-hidden="true">←</span> Back to upload
+        </button>
+        <button type="button" class="btn btn-primary" id="confirmBtn">
+          Confirm and generate report
+          <span aria-hidden="true">→</span>
+        </button>
+      </div>
+    </div>
+
   </main>
 
   <footer class="foot">
@@ -508,18 +814,101 @@
   <div class="spinner-wrap" id="spinner" role="status" aria-live="polite">
     <img src="{{ url_for('static', filename='standab-logo.png') }}" alt="Standab">
     <div class="spinner" aria-hidden="true"></div>
-    <div class="msg">Generating your report</div>
+    <div class="msg" id="spinnerMsg">Generating your report</div>
     <div class="elapsed" id="elapsed">0s elapsed</div>
-    <div class="sub">This can take anywhere from a few seconds to a couple of minutes depending on dataset size. The HTML report will download automatically when it is ready.</div>
+    <div class="sub" id="spinnerSub">This can take anywhere from a few seconds to a couple of minutes depending on dataset size. The HTML report will download automatically when it is ready.</div>
   </div>
 
   <script>
     (function() {
+      const REQUIRED_BASE = ['vehicle_id', 'start_time', 'end_time'];
+      const LATLNG_FIELDS = ['start_lat', 'start_lng', 'end_lat', 'end_lng'];
+      const GEOJSON_FIELDS = ['start_loc', 'end_loc'];
+      const FIELD_LABELS = {
+        vehicle_id: 'Vehicle ID',
+        start_time: 'Start time',
+        end_time: 'End time',
+        start_lat: 'Start latitude',
+        start_lng: 'Start longitude',
+        end_lat: 'End latitude',
+        end_lng: 'End longitude',
+        start_loc: 'Start GeoJSON',
+        end_loc: 'End GeoJSON',
+      };
+
+      const PARKING_FIELDS = ['name', 'lat', 'lng', 'address', 'zone', 'capacity', 'id'];
+      const PARKING_REQUIRED = ['lat', 'lng'];
+      const PARKING_LABELS = {
+        name: 'Name',
+        lat: 'Latitude',
+        lng: 'Longitude',
+        address: 'Address',
+        zone: 'Zone',
+        capacity: 'Capacity',
+        id: 'ID',
+      };
+
+      const FILE_ACCEPT = '.csv,.xlsx,text/csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+
+      const stepUpload = document.getElementById('stepUpload');
+      const stepMapping = document.getElementById('stepMapping');
+      const stepDot1 = document.getElementById('stepDot1');
+      const stepDot2 = document.getElementById('stepDot2');
+
       const rowsEl = document.getElementById('opRows');
       const addBtn = document.getElementById('addOpBtn');
       const form = document.getElementById('uploadForm');
-      const submitBtn = document.getElementById('submitBtn');
+      const uploadSubmitBtn = document.getElementById('uploadSubmitBtn');
+      const uploadError = document.getElementById('uploadError');
+
+      const mapList = document.getElementById('mapList');
+      const mapError = document.getElementById('mapError');
+      const backBtn = document.getElementById('backBtn');
+      const confirmBtn = document.getElementById('confirmBtn');
+
       const spinner = document.getElementById('spinner');
+      const spinnerMsg = document.getElementById('spinnerMsg');
+      const spinnerSub = document.getElementById('spinnerSub');
+      const elapsedEl = document.getElementById('elapsed');
+
+      let elapsedTimer = null;
+      let previewState = null;
+
+      function showStep(which) {
+        if (which === 'upload') {
+          stepUpload.classList.remove('hidden');
+          stepMapping.classList.add('hidden');
+          stepDot1.classList.add('on');
+          stepDot2.classList.remove('on');
+        } else {
+          stepUpload.classList.add('hidden');
+          stepMapping.classList.remove('hidden');
+          stepDot1.classList.remove('on');
+          stepDot2.classList.add('on');
+          window.scrollTo({ top: 0, behavior: 'smooth' });
+        }
+      }
+
+      function showUploadError(msg) {
+        if (!msg) {
+          uploadError.classList.remove('on');
+          uploadError.textContent = '';
+        } else {
+          uploadError.classList.add('on');
+          uploadError.textContent = msg;
+        }
+      }
+
+      function showMapError(msg) {
+        if (!msg) {
+          mapError.classList.remove('on');
+          mapError.textContent = '';
+        } else {
+          mapError.classList.add('on');
+          mapError.textContent = msg;
+          mapError.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+      }
 
       function renderRow(defaultName) {
         const row = document.createElement('div');
@@ -530,8 +919,8 @@
             <input type="text" name="operator_name" placeholder="e.g. Voi" value="${defaultName || ''}" autocomplete="off" />
           </div>
           <div>
-            <label class="lbl">Rides CSV</label>
-            <input type="file" name="operator_csv" accept=".csv,text/csv" required />
+            <label class="lbl">Rides file (CSV or XLSX)</label>
+            <input type="file" name="operator_csv" accept="${FILE_ACCEPT}" required />
           </div>
           <button type="button" class="remove" title="Remove this operator" aria-label="Remove">✕</button>
         `;
@@ -549,9 +938,6 @@
       }
 
       addBtn.addEventListener('click', () => renderRow());
-
-      const elapsedEl = document.getElementById('elapsed');
-      let elapsedTimer = null;
 
       function formatElapsed(seconds) {
         if (seconds < 60) return seconds + 's elapsed';
@@ -573,18 +959,36 @@
         if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
       }
 
-      function showOverlay() {
-        submitBtn.disabled = true;
-        submitBtn.innerHTML = 'Generating… <span aria-hidden="true">⏳</span>';
+      function showOverlay(msg, sub) {
+        spinnerMsg.textContent = msg || 'Working';
+        spinnerSub.textContent = sub || '';
         spinner.classList.add('on');
         startElapsed();
       }
 
       function hideOverlay() {
         stopElapsed();
-        submitBtn.disabled = false;
-        submitBtn.innerHTML = 'Generate report <span aria-hidden="true">→</span>';
         spinner.classList.remove('on');
+      }
+
+      function setUploadBtnLoading(loading) {
+        if (loading) {
+          uploadSubmitBtn.disabled = true;
+          uploadSubmitBtn.innerHTML = 'Reading files… <span aria-hidden="true">⏳</span>';
+        } else {
+          uploadSubmitBtn.disabled = false;
+          uploadSubmitBtn.innerHTML = 'Continue to column mapping <span aria-hidden="true">→</span>';
+        }
+      }
+
+      function setConfirmBtnLoading(loading) {
+        if (loading) {
+          confirmBtn.disabled = true;
+          confirmBtn.innerHTML = 'Generating… <span aria-hidden="true">⏳</span>';
+        } else {
+          confirmBtn.disabled = false;
+          confirmBtn.innerHTML = 'Confirm and generate report <span aria-hidden="true">→</span>';
+        }
       }
 
       function filenameFromHeader(header, fallback) {
@@ -608,36 +1012,669 @@
         setTimeout(() => URL.revokeObjectURL(url), 2000);
       }
 
+      function escapeHtml(str) {
+        return String(str == null ? '' : str)
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&#39;');
+      }
+
+      function buildOptions(columns, selected) {
+        let html = '<option value="">(none)</option>';
+        for (const col of columns) {
+          const isSel = (col === selected) ? ' selected' : '';
+          html += `<option value="${escapeHtml(col)}"${isSel}>${escapeHtml(col)}</option>`;
+        }
+        return html;
+      }
+
+      function buildSheetOptions(sheets, active) {
+        if (!sheets || !sheets.length) return '';
+        return sheets.map(s => {
+          const isSel = (s === active) ? ' selected' : '';
+          return `<option value="${escapeHtml(s)}"${isSel}>${escapeHtml(s)}</option>`;
+        }).join('');
+      }
+
+      function fieldRequired(canonical, coordMode) {
+        if (REQUIRED_BASE.indexOf(canonical) >= 0) return true;
+        if (coordMode === 'geojson') return GEOJSON_FIELDS.indexOf(canonical) >= 0;
+        return LATLNG_FIELDS.indexOf(canonical) >= 0;
+      }
+
+      function activeFields(coordMode) {
+        if (coordMode === 'geojson') {
+          return REQUIRED_BASE.concat(GEOJSON_FIELDS);
+        }
+        return REQUIRED_BASE.concat(LATLNG_FIELDS);
+      }
+
+      function buildFieldHtml(idx, file, canonical) {
+        const required = fieldRequired(canonical, file.coord_mode);
+        const optional = !required;
+        const selected = file.mapping[canonical] || '';
+        return `
+          <div class="map-field" data-canonical="${canonical}">
+            <div class="field-head">
+              <span class="field-name">
+                ${escapeHtml(FIELD_LABELS[canonical] || canonical)}
+                ${required ? '<span class="req">*</span>' : ''}
+              </span>
+              <span class="pill" data-status></span>
+            </div>
+            <select data-field="${canonical}" data-file="${idx}">
+              ${buildOptions(file.columns, selected)}
+            </select>
+            ${optional ? '' : ''}
+          </div>
+        `;
+      }
+
+      function buildFileCardHtml(idx, file) {
+        const sheetSelect = (file.sheets && file.sheets.length > 1)
+          ? `<div style="display:flex; align-items:center; gap:6px;">
+               <span style="font-size:11.5px; color: var(--muted); font-weight:500;">Sheet</span>
+               <select data-sheet-select="${idx}" style="width:auto; min-width:120px; padding:4px 26px 4px 8px; font-size:12.5px;">
+                 ${buildSheetOptions(file.sheets, file.active_sheet)}
+               </select>
+             </div>`
+          : '';
+
+        const warningHtml = file.warnings && file.warnings.length
+          ? `<div class="map-warn"><strong>Heads up</strong><ul>${file.warnings.map(w => `<li>${escapeHtml(w)}</li>`).join('')}</ul></div>`
+          : '';
+
+        const fields = activeFields(file.coord_mode);
+        const fieldsHtml = fields.map(c => buildFieldHtml(idx, file, c)).join('');
+
+        const modeId1 = `mode-latlng-${idx}`;
+        const modeId2 = `mode-geojson-${idx}`;
+
+        return `
+          <section class="map-card" data-file-card="${idx}">
+            <div class="map-head">
+              <div class="op">
+                <span class="op-label">Operator name</span>
+                <span class="op-name">
+                  <input type="text" data-operator-name="${idx}" value="${escapeHtml(file.operator_label || file.operator_key)}" autocomplete="off" />
+                </span>
+              </div>
+              <div class="file-meta">
+                <span><code>${escapeHtml(file.original_name)}</code></span>
+                ${sheetSelect}
+              </div>
+            </div>
+
+            ${warningHtml}
+
+            <div class="map-mode">
+              <input type="radio" id="${modeId1}" name="mode-${idx}" value="latlng" ${file.coord_mode === 'latlng' ? 'checked' : ''}>
+              <label for="${modeId1}">Lat / Lng columns</label>
+              <input type="radio" id="${modeId2}" name="mode-${idx}" value="geojson" ${file.coord_mode === 'geojson' ? 'checked' : ''}>
+              <label for="${modeId2}">GeoJSON columns</label>
+            </div>
+
+            <div class="map-fields" data-fields="${idx}">
+              ${fieldsHtml}
+            </div>
+
+            <div class="preview-wrap">
+              <div class="preview-head">Preview · first 5 rows (canonical view)</div>
+              <div class="preview-scroll">
+                <table class="preview" data-preview="${idx}">
+                  <thead></thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+            </div>
+          </section>
+        `;
+      }
+
+      function getFile(idx) {
+        return previewState.files[idx];
+      }
+
+      function refreshFile(idx) {
+        const file = getFile(idx);
+        const card = mapList.querySelector(`[data-file-card="${idx}"]`);
+        if (!card) return;
+        const fieldsContainer = card.querySelector(`[data-fields="${idx}"]`);
+        const fields = activeFields(file.coord_mode);
+        fieldsContainer.innerHTML = fields.map(c => buildFieldHtml(idx, file, c)).join('');
+        attachFieldHandlers(card, idx);
+        renderPills(idx);
+        renderPreview(idx);
+        renderConfirmState();
+      }
+
+      function attachFieldHandlers(card, idx) {
+        card.querySelectorAll('select[data-field]').forEach(sel => {
+          sel.addEventListener('change', () => {
+            const file = getFile(idx);
+            file.mapping[sel.dataset.field] = sel.value || null;
+            renderPills(idx);
+            renderPreview(idx);
+            renderConfirmState();
+          });
+        });
+      }
+
+      function renderPills(idx) {
+        const file = getFile(idx);
+        const card = mapList.querySelector(`[data-file-card="${idx}"]`);
+        if (!card) return;
+        const usedTo = {};
+        Object.keys(file.mapping).forEach(c => {
+          const v = file.mapping[c];
+          if (!v) return;
+          if (activeFields(file.coord_mode).indexOf(c) < 0) return;
+          if (!usedTo[v]) usedTo[v] = [];
+          usedTo[v].push(c);
+        });
+        card.querySelectorAll('.map-field').forEach(fieldEl => {
+          const canonical = fieldEl.dataset.canonical;
+          const pill = fieldEl.querySelector('[data-status]');
+          if (!pill) return;
+          const value = file.mapping[canonical] || '';
+          const required = fieldRequired(canonical, file.coord_mode);
+          const isAuto = (file.suggested && file.suggested[canonical] === value);
+          const dup = value && usedTo[value] && usedTo[value].length > 1;
+
+          pill.classList.remove('pill-good', 'pill-warn', 'pill-bad');
+          if (!value) {
+            if (required) {
+              pill.classList.add('pill-bad');
+              pill.textContent = 'Required';
+            } else {
+              pill.classList.add('pill-warn');
+              pill.textContent = 'Optional';
+            }
+          } else if (dup) {
+            pill.classList.add('pill-bad');
+            pill.textContent = 'Conflict';
+          } else if (isAuto) {
+            pill.classList.add('pill-good');
+            pill.textContent = 'Auto-detected';
+          } else {
+            pill.classList.add('pill-good');
+            pill.textContent = 'Mapped';
+          }
+        });
+      }
+
+      function renderPreview(idx) {
+        const file = getFile(idx);
+        const card = mapList.querySelector(`[data-file-card="${idx}"]`);
+        if (!card) return;
+        const tbl = card.querySelector(`[data-preview="${idx}"]`);
+        const thead = tbl.querySelector('thead');
+        const tbody = tbl.querySelector('tbody');
+        const fields = activeFields(file.coord_mode);
+
+        thead.innerHTML = '<tr>' + fields.map(c => `<th>${escapeHtml(FIELD_LABELS[c] || c)}</th>`).join('') + '</tr>';
+
+        const colIndex = {};
+        for (let i = 0; i < file.columns.length; i++) colIndex[file.columns[i]] = i;
+
+        const rows = file.sample_rows || [];
+        if (!rows.length) {
+          tbody.innerHTML = '<tr><td class="empty" colspan="' + fields.length + '">No sample rows available.</td></tr>';
+          return;
+        }
+
+        let html = '';
+        for (const row of rows) {
+          html += '<tr>';
+          for (const canonical of fields) {
+            const src = file.mapping[canonical];
+            if (!src) {
+              html += '<td class="empty">—</td>';
+              continue;
+            }
+            const i = colIndex[src];
+            if (i == null) { html += '<td class="empty">—</td>'; continue; }
+            const v = row[i];
+            if (v == null || v === '') {
+              html += '<td class="empty">—</td>';
+            } else {
+              const s = (typeof v === 'object') ? JSON.stringify(v) : String(v);
+              const trimmed = s.length > 80 ? s.slice(0, 80) + '…' : s;
+              html += `<td title="${escapeHtml(s)}">${escapeHtml(trimmed)}</td>`;
+            }
+          }
+          html += '</tr>';
+        }
+        tbody.innerHTML = html;
+      }
+
+      function attachCardHandlers(card, idx) {
+        card.querySelectorAll(`input[name="mode-${idx}"]`).forEach(input => {
+          input.addEventListener('change', () => {
+            if (!input.checked) return;
+            const file = getFile(idx);
+            file.coord_mode = input.value;
+            refreshFile(idx);
+          });
+        });
+
+        const sheetSel = card.querySelector(`[data-sheet-select="${idx}"]`);
+        if (sheetSel) {
+          sheetSel.addEventListener('change', async () => {
+            const file = getFile(idx);
+            const newSheet = sheetSel.value;
+            sheetSel.disabled = true;
+            try {
+              const resp = await fetch('/peek_sheet', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  job_id: previewState.job_id,
+                  saved_as: file.saved_as,
+                  sheet: newSheet,
+                }),
+              });
+              if (!resp.ok) {
+                const j = await resp.json().catch(() => ({}));
+                throw new Error(j.error || 'Sheet read failed');
+              }
+              const data = await resp.json();
+              file.columns = data.columns;
+              file.sample_rows = data.sample_rows;
+              file.sheets = data.sheets;
+              file.active_sheet = data.active_sheet;
+              file.suggested = data.suggested;
+              file.warnings = data.warnings || [];
+              file.coord_mode = data.suggested.coord_mode || file.coord_mode;
+              file.mapping = Object.assign({}, data.suggested);
+              delete file.mapping.coord_mode;
+              const newCard = document.createElement('div');
+              newCard.innerHTML = buildFileCardHtml(idx, file);
+              card.replaceWith(newCard.firstElementChild);
+              wireCard(idx);
+            } catch (err) {
+              showMapError('Could not switch sheet: ' + (err && err.message ? err.message : err));
+            } finally {
+              sheetSel.disabled = false;
+            }
+          });
+        }
+
+        attachFieldHandlers(card, idx);
+      }
+
+      function wireCard(idx) {
+        const card = mapList.querySelector(`[data-file-card="${idx}"]`);
+        if (!card) return;
+        attachCardHandlers(card, idx);
+        renderPills(idx);
+        renderPreview(idx);
+      }
+
+      function isFileValid(idx) {
+        const file = getFile(idx);
+        const fields = activeFields(file.coord_mode);
+        const used = {};
+        for (const c of fields) {
+          const v = file.mapping[c];
+          if (fieldRequired(c, file.coord_mode) && !v) return false;
+          if (v) {
+            if (used[v]) return false;
+            used[v] = c;
+          }
+        }
+        return true;
+      }
+
+      function renderConfirmState() {
+        const ridesValid = previewState.files.every((_, idx) => isFileValid(idx));
+        const parkingValid = !previewState.parking || isParkingValid();
+        confirmBtn.disabled = !(ridesValid && parkingValid);
+      }
+
+      function renderMapping(state) {
+        previewState = state;
+        previewState.files.forEach((file, idx) => {
+          file.coord_mode = (file.suggested && file.suggested.coord_mode) || 'latlng';
+          file.mapping = {};
+          Object.keys(file.suggested || {}).forEach(k => {
+            if (k === 'coord_mode') return;
+            file.mapping[k] = file.suggested[k] || null;
+          });
+        });
+        mapList.innerHTML = previewState.files.map((file, idx) => buildFileCardHtml(idx, file)).join('');
+        previewState.files.forEach((_, idx) => wireCard(idx));
+
+        if (previewState.parking) {
+          const p = previewState.parking;
+          p.mapping = {};
+          PARKING_FIELDS.forEach(f => {
+            p.mapping[f] = (p.suggested && p.suggested[f]) || null;
+          });
+          const wrap = document.createElement('div');
+          wrap.innerHTML = buildParkingCardHtml(p);
+          mapList.appendChild(wrap.firstElementChild);
+          wireParkingCard();
+        }
+
+        renderConfirmState();
+        showStep('mapping');
+      }
+
+      // ── Parking card ───────────────────────────────────
+      function buildParkingFieldHtml(p, canonical) {
+        const required = PARKING_REQUIRED.indexOf(canonical) >= 0;
+        const selected = p.mapping[canonical] || '';
+        return `
+          <div class="map-field" data-canonical="${canonical}">
+            <div class="field-head">
+              <span class="field-name">
+                ${escapeHtml(PARKING_LABELS[canonical] || canonical)}
+                ${required ? '<span class="req">*</span>' : ''}
+              </span>
+              <span class="pill" data-status></span>
+            </div>
+            <select data-pfield="${canonical}">
+              ${buildOptions(p.columns, selected)}
+            </select>
+          </div>
+        `;
+      }
+
+      function buildParkingCardHtml(p) {
+        const sheetSelect = (p.sheets && p.sheets.length > 1)
+          ? `<div style="display:flex; align-items:center; gap:6px;">
+               <span style="font-size:11.5px; color: var(--muted); font-weight:500;">Sheet</span>
+               <select data-parking-sheet style="width:auto; min-width:120px; padding:4px 26px 4px 8px; font-size:12.5px;">
+                 ${buildSheetOptions(p.sheets, p.active_sheet)}
+               </select>
+             </div>`
+          : '';
+
+        const warningHtml = p.warnings && p.warnings.length
+          ? `<div class="map-warn"><strong>Heads up</strong><ul>${p.warnings.map(w => `<li>${escapeHtml(w)}</li>`).join('')}</ul></div>`
+          : '';
+
+        const fieldsHtml = PARKING_FIELDS.map(c => buildParkingFieldHtml(p, c)).join('');
+
+        return `
+          <section class="map-card" data-file-card="parking">
+            <div class="map-head">
+              <div class="op">
+                <span class="op-label">Parking hubs overlay</span>
+                <span class="op-name">
+                  <input type="text" data-parking-label value="${escapeHtml(p.label || '')}" placeholder="Label (optional)" autocomplete="off" />
+                </span>
+              </div>
+              <div class="file-meta">
+                <span><code>${escapeHtml(p.original_name)}</code></span>
+                ${sheetSelect}
+              </div>
+            </div>
+
+            ${warningHtml}
+
+            <div class="map-fields" data-fields="parking">
+              ${fieldsHtml}
+            </div>
+
+            <div class="preview-wrap">
+              <div class="preview-head">Preview · first 5 rows (canonical view)</div>
+              <div class="preview-scroll">
+                <table class="preview" data-preview="parking">
+                  <thead></thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+            </div>
+          </section>
+        `;
+      }
+
+      function renderParkingPills() {
+        const p = previewState.parking;
+        const card = mapList.querySelector('[data-file-card="parking"]');
+        if (!card) return;
+        const usedTo = {};
+        Object.keys(p.mapping).forEach(c => {
+          const v = p.mapping[c];
+          if (!v) return;
+          if (!usedTo[v]) usedTo[v] = [];
+          usedTo[v].push(c);
+        });
+        card.querySelectorAll('.map-field').forEach(fieldEl => {
+          const canonical = fieldEl.dataset.canonical;
+          const pill = fieldEl.querySelector('[data-status]');
+          if (!pill) return;
+          const value = p.mapping[canonical] || '';
+          const required = PARKING_REQUIRED.indexOf(canonical) >= 0;
+          const isAuto = (p.suggested && p.suggested[canonical] === value);
+          const dup = value && usedTo[value] && usedTo[value].length > 1;
+
+          pill.classList.remove('pill-good', 'pill-warn', 'pill-bad');
+          if (!value) {
+            if (required) { pill.classList.add('pill-bad'); pill.textContent = 'Required'; }
+            else { pill.classList.add('pill-warn'); pill.textContent = 'Optional'; }
+          } else if (dup) {
+            pill.classList.add('pill-bad'); pill.textContent = 'Conflict';
+          } else if (isAuto) {
+            pill.classList.add('pill-good'); pill.textContent = 'Auto-detected';
+          } else {
+            pill.classList.add('pill-good'); pill.textContent = 'Mapped';
+          }
+        });
+      }
+
+      function renderParkingPreview() {
+        const p = previewState.parking;
+        const card = mapList.querySelector('[data-file-card="parking"]');
+        if (!card) return;
+        const tbl = card.querySelector('[data-preview="parking"]');
+        const thead = tbl.querySelector('thead');
+        const tbody = tbl.querySelector('tbody');
+
+        thead.innerHTML = '<tr>' + PARKING_FIELDS.map(c => `<th>${escapeHtml(PARKING_LABELS[c] || c)}</th>`).join('') + '</tr>';
+
+        const colIndex = {};
+        for (let i = 0; i < p.columns.length; i++) colIndex[p.columns[i]] = i;
+
+        const rows = p.sample_rows || [];
+        if (!rows.length) {
+          tbody.innerHTML = '<tr><td class="empty" colspan="' + PARKING_FIELDS.length + '">No sample rows available.</td></tr>';
+          return;
+        }
+
+        let html = '';
+        for (const row of rows) {
+          html += '<tr>';
+          for (const canonical of PARKING_FIELDS) {
+            const src = p.mapping[canonical];
+            if (!src) { html += '<td class="empty">—</td>'; continue; }
+            const i = colIndex[src];
+            if (i == null) { html += '<td class="empty">—</td>'; continue; }
+            const v = row[i];
+            if (v == null || v === '') {
+              html += '<td class="empty">—</td>';
+            } else {
+              const s = (typeof v === 'object') ? JSON.stringify(v) : String(v);
+              const trimmed = s.length > 80 ? s.slice(0, 80) + '…' : s;
+              html += `<td title="${escapeHtml(s)}">${escapeHtml(trimmed)}</td>`;
+            }
+          }
+          html += '</tr>';
+        }
+        tbody.innerHTML = html;
+      }
+
+      function wireParkingCard() {
+        const card = mapList.querySelector('[data-file-card="parking"]');
+        if (!card) return;
+
+        card.querySelectorAll('select[data-pfield]').forEach(sel => {
+          sel.addEventListener('change', () => {
+            previewState.parking.mapping[sel.dataset.pfield] = sel.value || null;
+            renderParkingPills();
+            renderParkingPreview();
+            renderConfirmState();
+          });
+        });
+
+        const sheetSel = card.querySelector('[data-parking-sheet]');
+        if (sheetSel) {
+          sheetSel.addEventListener('change', async () => {
+            const p = previewState.parking;
+            const newSheet = sheetSel.value;
+            sheetSel.disabled = true;
+            try {
+              const resp = await fetch('/peek_sheet', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  job_id: previewState.job_id,
+                  saved_as: p.saved_as,
+                  sheet: newSheet,
+                  kind: 'parking',
+                }),
+              });
+              if (!resp.ok) {
+                const j = await resp.json().catch(() => ({}));
+                throw new Error(j.error || 'Sheet read failed');
+              }
+              const data = await resp.json();
+              p.columns = data.columns;
+              p.sample_rows = data.sample_rows;
+              p.sheets = data.sheets;
+              p.active_sheet = data.active_sheet;
+              p.suggested = data.suggested;
+              p.warnings = data.warnings || [];
+              p.mapping = {};
+              PARKING_FIELDS.forEach(f => { p.mapping[f] = (p.suggested && p.suggested[f]) || null; });
+              const newCard = document.createElement('div');
+              newCard.innerHTML = buildParkingCardHtml(p);
+              card.replaceWith(newCard.firstElementChild);
+              wireParkingCard();
+              renderConfirmState();
+            } catch (err) {
+              showMapError('Could not switch parking sheet: ' + (err && err.message ? err.message : err));
+            } finally {
+              sheetSel.disabled = false;
+            }
+          });
+        }
+
+        renderParkingPills();
+        renderParkingPreview();
+      }
+
+      function isParkingValid() {
+        if (!previewState.parking) return true;
+        const p = previewState.parking;
+        const used = {};
+        for (const c of PARKING_FIELDS) {
+          const v = p.mapping[c];
+          if (PARKING_REQUIRED.indexOf(c) >= 0 && !v) return false;
+          if (v) {
+            if (used[v]) return false;
+            used[v] = c;
+          }
+        }
+        return true;
+      }
+
       form.addEventListener('submit', async (e) => {
         e.preventDefault();
-        showOverlay();
+        showUploadError('');
+        setUploadBtnLoading(true);
+        try {
+          const resp = await fetch('/preview', { method: 'POST', body: new FormData(form) });
+          if (!resp.ok) {
+            const j = await resp.json().catch(() => ({}));
+            throw new Error(j.error || ('Upload failed (HTTP ' + resp.status + ')'));
+          }
+          const data = await resp.json();
+          if (!data || !data.files || !data.files.length) {
+            throw new Error('No files were processed.');
+          }
+          renderMapping(data);
+        } catch (err) {
+          showUploadError(err && err.message ? err.message : String(err));
+        } finally {
+          setUploadBtnLoading(false);
+        }
+      });
+
+      backBtn.addEventListener('click', () => {
+        showMapError('');
+        showStep('upload');
+      });
+
+      confirmBtn.addEventListener('click', async () => {
+        if (!previewState) return;
+        showMapError('');
+
+        const payload = {
+          job_id: previewState.job_id,
+          files: previewState.files.map((file, idx) => {
+            const card = mapList.querySelector(`[data-file-card="${idx}"]`);
+            const nameInput = card ? card.querySelector(`[data-operator-name="${idx}"]`) : null;
+            const operatorKey = (nameInput && nameInput.value) ? nameInput.value : (file.operator_label || file.operator_key);
+            return {
+              operator_key: operatorKey,
+              saved_as: file.saved_as,
+              sheet: file.active_sheet || null,
+              coord_mode: file.coord_mode,
+              mapping: file.mapping,
+              original_name: file.original_name,
+            };
+          }),
+        };
+
+        if (previewState.parking) {
+          const p = previewState.parking;
+          const card = mapList.querySelector('[data-file-card="parking"]');
+          const labelInput = card ? card.querySelector('[data-parking-label]') : null;
+          payload.parking = {
+            saved_as: p.saved_as,
+            sheet: p.active_sheet || null,
+            mapping: p.mapping,
+            label: (labelInput && labelInput.value) ? labelInput.value.trim() : (p.label || ''),
+            original_name: p.original_name,
+          };
+        }
+
+        setConfirmBtnLoading(true);
+        showOverlay(
+          'Generating your report',
+          'Running the analysis notebook with your confirmed mapping. This usually takes 30 seconds to a few minutes.'
+        );
 
         try {
-          const response = await fetch(form.action, {
-            method: 'POST',
-            body: new FormData(form),
-          });
+          const fd = new FormData();
+          fd.append('payload', JSON.stringify(payload));
+          const resp = await fetch('/generate', { method: 'POST', body: fd });
 
-          if (!response.ok) {
-            // Server rendered error.html (500) — replace the page with it so the
-            // user sees the traceback and can go back to the upload form.
-            const html = await response.text();
+          if (!resp.ok) {
+            const html = await resp.text();
             document.open();
             document.write(html);
             document.close();
             return;
           }
 
-          const blob = await response.blob();
+          const blob = await resp.blob();
           const filename = filenameFromHeader(
-            response.headers.get('Content-Disposition'),
+            resp.headers.get('Content-Disposition'),
             'standab-analysis.html'
           );
           triggerDownload(blob, filename);
           hideOverlay();
+          setConfirmBtnLoading(false);
         } catch (err) {
           hideOverlay();
-          alert('Failed to generate report: ' + (err && err.message ? err.message : err));
+          setConfirmBtnLoading(false);
+          showMapError('Failed to generate report: ' + (err && err.message ? err.message : err));
         }
       });
 
