@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import math
+import re
 import warnings
 import zlib
 from collections import defaultdict
@@ -40,6 +41,7 @@ START_TIME_ALIASES: list[str] = [
     "started_at",
     "start_datetime",
     "starttime",
+    "timestamp_start",
 ]
 
 END_TIME_ALIASES: list[str] = [
@@ -51,6 +53,7 @@ END_TIME_ALIASES: list[str] = [
     "ended_at",
     "end_datetime",
     "endtime",
+    "timestamp_end",
 ]
 
 START_LAT_ALIASES: list[str] = [
@@ -75,6 +78,7 @@ START_LNG_ALIASES: list[str] = [
     "startlongitude",
     "pickup_lng",
     "lon_start",
+    "long_start",
     "lngpickup",
 ]
 
@@ -100,6 +104,7 @@ END_LNG_ALIASES: list[str] = [
     "endlongitude",
     "dropoff_lng",
     "lon_end",
+    "long_end",
     "lngdropoff",
 ]
 
@@ -131,6 +136,43 @@ REQUIRED_LATLNG_FIELDS: tuple[str, ...] = (
     "end_lng",
 )
 REQUIRED_GEOJSON_FIELDS: tuple[str, ...] = ("start_loc", "end_loc")
+
+
+def clean_numeric_series(series: pd.Series) -> pd.Series:
+    """Coerce a coordinate/numeric column to float, repairing corrupted values.
+
+    Some operator exports contain stray whitespace injected inside values
+    (e.g. ``"5 1.961097"`` instead of ``51.961097``), which makes pandas load
+    the whole column as strings. Numbers never legitimately contain
+    whitespace, so we strip it from string values before converting.
+    """
+    if pd.api.types.is_numeric_dtype(series):
+        return pd.to_numeric(series, errors="coerce")
+    stripped = series.astype(str).str.replace(r"\s+", "", regex=True)
+    return pd.to_numeric(stripped, errors="coerce")
+
+
+# Matches a date + time-of-day inside a timestamp string whose whitespace has
+# been removed, e.g. "2025-05-0104:49:33.563UTC" -> ("2025-05-01", "04:49:33.563").
+_COMPACT_TS_RE = re.compile(
+    r"(\d{4}-\d{2}-\d{2})T?(\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)"
+)
+
+
+def _repair_timestamp_strings(series: pd.Series) -> pd.Series:
+    """Last-resort parse of timestamps corrupted by stray internal spaces.
+
+    Handles values like ``"2025-05-01 0 4:49:33.563 UT C"``: all whitespace is
+    removed and the date/time components are re-extracted by pattern, so a
+    space anywhere (inside the tz suffix, the time digits, or the date) no
+    longer turns the row into NaT.
+    """
+    compact = series.astype(str).str.replace(r"\s+", "", regex=True)
+    parts = compact.str.extract(_COMPACT_TS_RE)
+    repaired = parts[0].str.cat(parts[1], sep=" ")
+    # format="mixed": repaired values may or may not carry fractional seconds;
+    # letting pandas infer one format from the first row would NaT the rest.
+    return pd.to_datetime(repaired, format="mixed", errors="coerce", utc=True)
 
 
 def _pick_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
@@ -240,6 +282,13 @@ def standardize_rides_dataframe(df_rides: pd.DataFrame) -> pd.DataFrame:
         warnings.warn(
             f"df_rides is missing expected columns: {missing}. Available columns: {list(df.columns)}"
         )
+
+    # Repair + coerce coordinate columns up front. Corrupted exports (stray
+    # spaces inside values) otherwise leave these columns as mixed str/float,
+    # which crashes min()/max() in the auto search-area derivation.
+    for col in ("start_lat", "start_lng", "end_lat", "end_lng"):
+        if col in df.columns:
+            df[col] = clean_numeric_series(df[col])
     return df
 
 
@@ -262,6 +311,13 @@ def _parse_time_series(series: pd.Series) -> pd.Series:
                 parsed.loc[mask] = pd.to_datetime(
                     series.loc[mask].astype(str), errors="coerce", utc=True
                 )
+        except Exception:
+            pass
+
+        try:
+            mask = parsed.isna()
+            if bool(mask.any()):
+                parsed.loc[mask] = _repair_timestamp_strings(series.loc[mask])
         except Exception:
             pass
     return parsed
@@ -379,6 +435,8 @@ def compute_map_search_area(
         raise ValueError("No start/end lat/lng columns available to auto-derive MAP_SEARCH_AREA")
 
     coords = pd.concat(cols, axis=0, ignore_index=True)
+    coords["lat"] = clean_numeric_series(coords["lat"])
+    coords["lng"] = clean_numeric_series(coords["lng"])
     coords = coords[coords["lat"].notna() & coords["lng"].notna()]
     if coords.empty:
         raise ValueError("No non-null coordinates available to auto-derive MAP_SEARCH_AREA")
