@@ -156,7 +156,7 @@
       color: var(--muted);
       margin: 0 0 5px;
     }
-    input[type=text], input[type=file], select {
+    input[type=text], input[type=number], input[type=date], input[type=file], select {
       width: 100%;
       padding: 8px 10px;
       border: 1px solid var(--line);
@@ -168,7 +168,7 @@
       font-weight: 500;
       transition: border-color 0.12s, box-shadow 0.12s;
     }
-    input[type=text]:focus, input[type=file]:focus, select:focus {
+    input[type=text]:focus, input[type=number]:focus, input[type=date]:focus, input[type=file]:focus, select:focus {
       outline: none;
       border-color: #94a3b8;
       box-shadow: 0 0 0 3px rgba(148,163,184,0.18);
@@ -726,6 +726,31 @@
             </div>
           </div>
 
+          <div class="parking-slot">
+            <div class="parking-slot-title">Post-deployment rides <span class="opt-tag">Optional</span></div>
+            <div class="parking-slot-sub">Upload rides recorded after your stations were deployed to unlock a Before/After comparison tab in the report. Same rides format as the operator files above (CSV or Excel).</div>
+            <div class="parking-slot-grid">
+              <div>
+                <label class="lbl">Label (optional)</label>
+                <input type="text" name="post_label" placeholder="e.g. Vaasa after deployment" autocomplete="off" />
+              </div>
+              <div>
+                <label class="lbl">Post-deployment rides file (CSV or XLSX)</label>
+                <input type="file" name="post_csv" accept=".csv,.xlsx,text/csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" />
+              </div>
+            </div>
+            <div class="parking-slot-grid" style="margin-top:10px;">
+              <div>
+                <label class="lbl">Stations deployed (if known)</label>
+                <input type="number" name="post_station_count" min="1" step="1" placeholder="Stations deployed (if known)" />
+              </div>
+              <div>
+                <label class="lbl">Deployment completed (if known)</label>
+                <input type="date" name="post_deploy_date" />
+              </div>
+            </div>
+          </div>
+
           <div class="submit-bar">
             <button type="submit" class="btn btn-primary btn-block" id="uploadSubmitBtn">
               Continue to column mapping
@@ -1092,15 +1117,27 @@
         const modeId1 = `mode-latlng-${idx}`;
         const modeId2 = `mode-geojson-${idx}`;
 
+        // Post-deployment cards have a fixed label (they must not create a
+        // second operator) plus a visible badge so the card is unmistakable.
+        const opHtml = file.is_post
+          ? `<div class="op">
+              <span class="op-label">Post-deployment rides</span>
+              <span class="op-name" style="display:inline-flex; align-items:center; gap:8px; font-size:14px; font-weight:600; color:var(--ink-strong); padding:6px 0;">
+                ${escapeHtml(file.operator_label || 'Post-deployment')}
+                <span class="opt-tag">Post-deployment</span>
+              </span>
+            </div>`
+          : `<div class="op">
+              <span class="op-label">Operator name</span>
+              <span class="op-name">
+                <input type="text" data-operator-name="${idx}" value="${escapeHtml(file.operator_label || file.operator_key)}" autocomplete="off" />
+              </span>
+            </div>`;
+
         return `
           <section class="map-card" data-file-card="${idx}">
             <div class="map-head">
-              <div class="op">
-                <span class="op-label">Operator name</span>
-                <span class="op-name">
-                  <input type="text" data-operator-name="${idx}" value="${escapeHtml(file.operator_label || file.operator_key)}" autocomplete="off" />
-                </span>
-              </div>
+              ${opHtml}
               <div class="file-meta">
                 <span><code>${escapeHtml(file.original_name)}</code></span>
                 ${sheetSelect}
@@ -1336,6 +1373,28 @@
 
       function renderMapping(state) {
         previewState = state;
+
+        // The post-deployment file is rides-shaped, so it rides along as a
+        // pseudo-entry in previewState.files and reuses the whole rides-card
+        // machinery (build/wire/pills/preview/validation/sheet re-peek).
+        if (previewState.post && !previewState.files.some(f => f.is_post)) {
+          const post = previewState.post;
+          previewState.files.push({
+            is_post: true,
+            operator_key: 'POST_DEPLOYMENT',
+            operator_label: post.label || 'Post-deployment',
+            original_name: post.original_name,
+            saved_as: post.saved_as,
+            is_excel: post.is_excel,
+            columns: post.columns,
+            sample_rows: post.sample_rows,
+            sheets: post.sheets,
+            active_sheet: post.active_sheet,
+            suggested: post.suggested,
+            warnings: post.warnings || [],
+          });
+        }
+
         previewState.files.forEach((file, idx) => {
           file.coord_mode = (file.suggested && file.suggested.coord_mode) || 'latlng';
           file.mapping = {};
@@ -1614,22 +1673,43 @@
         if (!previewState) return;
         showMapError('');
 
-        const payload = {
-          job_id: previewState.job_id,
-          files: previewState.files.map((file, idx) => {
-            const card = mapList.querySelector(`[data-file-card="${idx}"]`);
-            const nameInput = card ? card.querySelector(`[data-operator-name="${idx}"]`) : null;
-            const operatorKey = (nameInput && nameInput.value) ? nameInput.value : (file.operator_label || file.operator_key);
-            return {
-              operator_key: operatorKey,
+        // Split entries: the post-deployment pseudo-entry becomes payload.post
+        // (a single object); real operator files go to payload.files as before.
+        const fileEntries = [];
+        let postEntry = null;
+        previewState.files.forEach((file, idx) => {
+          if (file.is_post) {
+            const post = previewState.post || {};
+            postEntry = {
               saved_as: file.saved_as,
               sheet: file.active_sheet || null,
               coord_mode: file.coord_mode,
               mapping: file.mapping,
+              label: file.operator_label || post.label || '',
               original_name: file.original_name,
+              station_count: (post.station_count != null) ? post.station_count : null,
+              deploy_date: post.deploy_date || null,
             };
-          }),
+            return;
+          }
+          const card = mapList.querySelector(`[data-file-card="${idx}"]`);
+          const nameInput = card ? card.querySelector(`[data-operator-name="${idx}"]`) : null;
+          const operatorKey = (nameInput && nameInput.value) ? nameInput.value : (file.operator_label || file.operator_key);
+          fileEntries.push({
+            operator_key: operatorKey,
+            saved_as: file.saved_as,
+            sheet: file.active_sheet || null,
+            coord_mode: file.coord_mode,
+            mapping: file.mapping,
+            original_name: file.original_name,
+          });
+        });
+
+        const payload = {
+          job_id: previewState.job_id,
+          files: fileEntries,
         };
+        if (postEntry) payload.post = postEntry;
 
         if (previewState.parking) {
           const p = previewState.parking;

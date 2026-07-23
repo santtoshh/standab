@@ -63,11 +63,20 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger("standab-web")
 
 
+# Canonical-file prefixes claimed by the special upload slots. An operator
+# named e.g. "post" would otherwise write POST__canonical.csv and silently
+# collide with the post-deployment dataset's file.
+_RESERVED_OPERATOR_KEYS = {"POST", "PARKING"}
+
+
 def _sanitize_operator_key(raw: str, fallback_index: int) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9_-]+", "_", (raw or "").strip()).strip("_-")
     if not cleaned:
         cleaned = f"OP{fallback_index + 1}"
-    return cleaned.upper()[:32]
+    key = cleaned.upper()[:32]
+    if key in _RESERVED_OPERATOR_KEYS:
+        key = f"{key}_OP"
+    return key
 
 
 def _sanitize_stem(raw: str) -> str:
@@ -79,6 +88,24 @@ def _sanitize_stem(raw: str) -> str:
 def _sanitize_job_id(raw: str) -> str | None:
     cleaned = re.sub(r"[^A-Za-z0-9]", "", (raw or "").strip())[:32]
     return cleaned or None
+
+
+def _parse_station_count(raw) -> int | None:
+    """Parse a station count; silently return None for missing/invalid/non-positive."""
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+_DEPLOY_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _parse_deploy_date(raw) -> str | None:
+    """Keep a deploy date only if it matches YYYY-MM-DD; otherwise None."""
+    cleaned = str(raw or "").strip()
+    return cleaned if _DEPLOY_DATE_RE.fullmatch(cleaned) else None
 
 
 def _build_download_name(original_filenames: list[str]) -> str:
@@ -180,31 +207,25 @@ def _find_rides_paths_cell(nb: nbformat.NotebookNode) -> int | None:
     return None
 
 
-def _run_notebook(
+def _patch_rides_cell_source(
+    original: str,
     rides_paths: dict[str, str],
-    workdir: Path,
-    parking_path: str | None = None,
-    parking_label: str = "",
-) -> Path:
-    nb = nbformat.read(str(NOTEBOOK_PATH), as_version=4)
-    swaps_dummy = _write_dummy_swaps_csv(workdir)
+    swaps_path: str,
+    parking_path: str | None,
+    parking_label: str,
+    post_rides_path: str | None = None,
+    post_label: str = "",
+    post_station_count: int | None = None,
+    post_deploy_date: str | None = None,
+) -> str:
+    """Pure function: rewrite the notebook's rides-paths cell source.
 
-    boot_src = _BOOT_SRC_TEMPLATE.format(
-        project_root=str(PROJECT_ROOT),
-        workdir=str(workdir),
-    )
-
-    nb.cells.insert(0, nbformat.v4.new_code_cell(boot_src))
-
-    rides_cell_idx = _find_rides_paths_cell(nb)
-    if rides_cell_idx is None:
-        raise RuntimeError(
-            "Could not find the RIDES_CSV_PATHS assignment cell in the notebook."
-        )
-    original = nb.cells[rides_cell_idx].get("source", "")
-    if isinstance(original, list):
-        original = "".join(original)
-
+    Injects RIDES_CSV_PATHS / SWAPS_CSV_PATH / PARKING_HUBS_* exactly as
+    before, plus the optional POST_* pre/post-comparison assignments. Every
+    assignment is replaced in place when the notebook already declares it and
+    appended after a guaranteed anchor line otherwise, so this works whether
+    or not the notebook declares the POST_* variables yet.
+    """
     patched = re.sub(
         r"RIDES_CSV_PATHS\s*=\s*\{[\s\S]*?\}",
         f"RIDES_CSV_PATHS = {rides_paths!r}  # [standab-web] injected",
@@ -213,7 +234,7 @@ def _run_notebook(
     )
     patched = re.sub(
         r"^\s*SWAPS_CSV_PATH\s*=.*$",
-        f"SWAPS_CSV_PATH = {str(swaps_dummy)!r}  # [standab-web] injected",
+        f"SWAPS_CSV_PATH = {str(swaps_path)!r}  # [standab-web] injected",
         patched,
         count=1,
         flags=re.MULTILINE,
@@ -243,12 +264,101 @@ def _run_notebook(
             count=1,
             flags=re.MULTILINE,
         )
-    patched = re.sub(
-        r"^\s*PARKING_HUBS_UI_LABEL\s*=.*$",
-        f"PARKING_HUBS_UI_LABEL = {parking_label!r}  # [standab-web] injected",
-        patched,
-        count=1,
-        flags=re.MULTILINE,
+    # PARKING_HUBS_UI_LABEL is exists-or-append so it is always present: it is
+    # the anchor line for the POST_* assignments below.
+    label_line = f"PARKING_HUBS_UI_LABEL = {parking_label!r}  # [standab-web] injected"
+    if re.search(r"^\s*PARKING_HUBS_UI_LABEL\s*=", patched, flags=re.MULTILINE):
+        patched = re.sub(
+            r"^\s*PARKING_HUBS_UI_LABEL\s*=.*$",
+            label_line,
+            patched,
+            count=1,
+            flags=re.MULTILINE,
+        )
+    else:
+        patched = re.sub(
+            r"(^\s*PARKING_HUBS_PATH\s*=.*$)",
+            lambda m: m.group(1) + "\n" + label_line,
+            patched,
+            count=1,
+            flags=re.MULTILINE,
+        )
+
+    post_assignments = [
+        ("POST_RIDES_CSV_PATH", repr(post_rides_path) if post_rides_path else "None"),
+        ("POST_RIDES_UI_LABEL", repr(post_label or "")),
+        (
+            "POST_STATION_COUNT",
+            str(int(post_station_count)) if post_station_count is not None else "None",
+        ),
+        ("POST_DEPLOY_DATE", repr(post_deploy_date) if post_deploy_date else "None"),
+    ]
+    missing_lines: list[str] = []
+    for var, value in post_assignments:
+        line = f"{var} = {value}  # [standab-web] injected"
+        # NB: [ \t]* (not \s*) so a blank line preceding the declaration is
+        # not swallowed into the match under re.MULTILINE.
+        if re.search(rf"^[ \t]*{var}\s*=", patched, flags=re.MULTILINE):
+            patched = re.sub(
+                rf"^[ \t]*{var}\s*=.*$",
+                lambda m, _line=line: _line,
+                patched,
+                count=1,
+                flags=re.MULTILINE,
+            )
+        else:
+            missing_lines.append(line)
+    if missing_lines:
+        block = "\n".join(missing_lines)
+        patched = re.sub(
+            r"(^\s*PARKING_HUBS_UI_LABEL\s*=.*$)",
+            lambda m: m.group(1) + "\n" + block,
+            patched,
+            count=1,
+            flags=re.MULTILINE,
+        )
+    return patched
+
+
+def _run_notebook(
+    rides_paths: dict[str, str],
+    workdir: Path,
+    parking_path: str | None = None,
+    parking_label: str = "",
+    post_rides_path: str | None = None,
+    post_label: str = "",
+    post_station_count: int | None = None,
+    post_deploy_date: str | None = None,
+) -> Path:
+    nb = nbformat.read(str(NOTEBOOK_PATH), as_version=4)
+    swaps_dummy = _write_dummy_swaps_csv(workdir)
+
+    boot_src = _BOOT_SRC_TEMPLATE.format(
+        project_root=str(PROJECT_ROOT),
+        workdir=str(workdir),
+    )
+
+    nb.cells.insert(0, nbformat.v4.new_code_cell(boot_src))
+
+    rides_cell_idx = _find_rides_paths_cell(nb)
+    if rides_cell_idx is None:
+        raise RuntimeError(
+            "Could not find the RIDES_CSV_PATHS assignment cell in the notebook."
+        )
+    original = nb.cells[rides_cell_idx].get("source", "")
+    if isinstance(original, list):
+        original = "".join(original)
+
+    patched = _patch_rides_cell_source(
+        original,
+        rides_paths=rides_paths,
+        swaps_path=str(swaps_dummy),
+        parking_path=parking_path,
+        parking_label=parking_label,
+        post_rides_path=post_rides_path,
+        post_label=post_label,
+        post_station_count=post_station_count,
+        post_deploy_date=post_deploy_date,
     )
     nb.cells[rides_cell_idx] = nbformat.v4.new_code_cell(patched)
 
@@ -395,15 +505,62 @@ def preview():
                 400,
             )
 
+    # Optional post-deployment rides file (rides-shaped; unlocks the
+    # Before/After comparison tab in the report).
+    post_block = None
+    post_storage = request.files.get("post_csv")
+    if post_storage and post_storage.filename:
+        try:
+            safe = secure_filename(post_storage.filename) or "post_rides.csv"
+            saved_as = f"POST__{safe}"
+            dest = uploads_dir / saved_as
+            post_storage.save(str(dest))
+            peek = peek_dataset(dest)
+            post_label_raw = (request.form.get("post_label") or "").strip()
+            post_block = {
+                "original_name": post_storage.filename,
+                "saved_as": saved_as,
+                "label": post_label_raw or Path(post_storage.filename).stem,
+                "is_excel": Path(saved_as).suffix.lower() in {".xlsx", ".xls"},
+                "station_count": _parse_station_count(
+                    request.form.get("post_station_count")
+                ),
+                "deploy_date": _parse_deploy_date(
+                    request.form.get("post_deploy_date")
+                ),
+                **peek,
+            }
+        except Exception as exc:
+            log.exception("preview: failed to peek post-deployment file (job=%s)", job_id)
+            shutil.rmtree(workdir, ignore_errors=True)
+            return (
+                jsonify(
+                    {
+                        "error": (
+                            f"Could not read post-deployment file "
+                            f"'{post_storage.filename}': {exc}. "
+                            "Confirm it is a valid CSV or XLSX."
+                        )
+                    }
+                ),
+                400,
+            )
+
     log.info(
-        "preview: job=%s files=%d operators=%s parking=%s",
+        "preview: job=%s files=%d operators=%s parking=%s post=%s",
         job_id,
         len(response_files),
         [f["operator_key"] for f in response_files],
         bool(parking_block),
+        bool(post_block),
     )
     return jsonify(
-        {"job_id": job_id, "files": response_files, "parking": parking_block}
+        {
+            "job_id": job_id,
+            "files": response_files,
+            "parking": parking_block,
+            "post": post_block,
+        }
     )
 
 
@@ -584,11 +741,68 @@ def generate():
                 http_status=400,
             )
 
+    # Optional post-deployment rides dataset (rides-shaped, same trio of
+    # peek/validate/materialize as the operator files).
+    post_rides_path: str | None = None
+    post_label: str = ""
+    post_station_count: int | None = None
+    post_deploy_date: str | None = None
+    post_entry = payload.get("post")
+    if post_entry:
+        try:
+            saved_as = (post_entry.get("saved_as") or "").strip()
+            if not saved_as:
+                raise ValueError("Post-deployment entry needs saved_as.")
+            if "/" in saved_as or "\\" in saved_as or saved_as.startswith(".."):
+                raise ValueError(
+                    f"Invalid post-deployment file reference: {saved_as}"
+                )
+            src = uploads_dir / saved_as
+            if not src.exists():
+                raise ValueError(
+                    f"Post-deployment file '{saved_as}' is no longer available. "
+                    "Please re-upload."
+                )
+            mapping = post_entry.get("mapping") or {}
+            coord_mode = (post_entry.get("coord_mode") or "latlng").lower()
+            sheet = post_entry.get("sheet")
+            errors = validate_mapping(mapping, coord_mode)
+            if errors:
+                raise ValueError(
+                    "Post-deployment mapping is incomplete: " + "; ".join(errors)
+                )
+            dest = uploads_dir / "POST__canonical.csv"
+            try:
+                materialize_dataset(
+                    src_path=src,
+                    dest_path=dest,
+                    mapping=mapping,
+                    coord_mode=coord_mode,
+                    sheet=sheet,
+                )
+            except Exception as exc:
+                raise ValueError(
+                    f"Failed to apply post-deployment mapping: {exc}"
+                ) from exc
+            post_rides_path = str(dest)
+            post_label = (post_entry.get("label") or "").strip()
+            post_station_count = _parse_station_count(post_entry.get("station_count"))
+            post_deploy_date = _parse_deploy_date(post_entry.get("deploy_date"))
+            original_filenames.append(post_entry.get("original_name") or saved_as)
+        except ValueError as exc:
+            return _render_error(
+                job_id,
+                "We couldn't apply your post-deployment mapping.",
+                str(exc),
+                http_status=400,
+            )
+
     log.info(
-        "generate: job=%s operators=%s parking=%s workdir=%s",
+        "generate: job=%s operators=%s parking=%s post=%s workdir=%s",
         job_id,
         list(rides_paths.keys()),
         bool(parking_path),
+        bool(post_rides_path),
         workdir,
     )
 
@@ -598,6 +812,10 @@ def generate():
             workdir,
             parking_path=parking_path,
             parking_label=parking_label,
+            post_rides_path=post_rides_path,
+            post_label=post_label,
+            post_station_count=post_station_count,
+            post_deploy_date=post_deploy_date,
         )
         with open(output_html, "rb") as fh:
             blob = fh.read()

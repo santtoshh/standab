@@ -30,6 +30,8 @@ VEHICLE_ID_ALIASES: list[str] = [
     "scooter_id",
     "bike_id",
     "vehicle_identifier",
+    "qrcode",
+    "qr_code",
 ]
 
 START_TIME_ALIASES: list[str] = [
@@ -404,6 +406,11 @@ def add_datetime_and_dwell_columns(
     within_radius = (dist_m <= radius) & df["next_start_time"].notna().to_numpy()
     df["dwell_same_loc_mins"] = np.where(
         within_radius, df["dwell_to_next_start_mins"], np.nan
+    )
+    # End -> next-start displacement (m). Large values are relocation/van-move
+    # proxies used by the pre/post deployment comparison.
+    df["dist_to_next_start_m"] = np.where(
+        df["next_start_time"].notna().to_numpy(), dist_m, np.nan
     )
     return df, dataset_end_max
 
@@ -1522,6 +1529,747 @@ def build_payload(
         "default_wcharge": float(optimiser_weights.get("chargecount", 0.0)),
         "default_wfleet": float(optimiser_weights.get("fleetcoverage", 1.0)),
     }
+
+
+# --- Pre/post deployment comparison ---------------------------------------
+#
+# All comparison statistics are computed here, in Python, once. The JS
+# "Compare" tab is strictly a renderer. Statistics are pooled at
+# COMPARE_H3_RES (res-10 parents of the res-11 analysis hexes) because the
+# post window is short: at raw res 11 the median cell has ~2 ride-ends over
+# 15 days, which makes per-cell inference meaningless.
+
+COMPARE_H3_RES = 10
+COMPARE_MIN_ENDS = 30          # per-cell floor: below this a cell is "insufficient"
+COMPARE_Z_COLOR = 1.96         # |z| needed before a cell is colored on the map
+COMPARE_Z_CANDIDATE = 3.0      # z needed for a station-candidate row to pre-check
+COMPARE_MIN_LIFT = 0.5         # +50% end-share lift for candidate pre-check
+COMPARE_SAME_SEASON_MIN_DAYS = 21
+COMPARE_OUTLIER_FRAC = 0.5     # day is an outlier if total ends < frac * median
+COMPARE_BOOT_ITERS = 500
+COMPARE_MAX_CURVE_K = 150
+COMPARE_MAX_CANDIDATES = 40
+COMPARE_DWELL_CAP_MINS = 1440.0
+COMPARE_RELOC_THRESHOLD_M = 200.0
+
+
+def h3_cell_to_parent(cell, res):
+    if hasattr(h3, "cell_to_parent"):
+        return h3.cell_to_parent(cell, res)
+    return h3.h3_to_parent(cell, res)
+
+
+def _cmp_day_frame(df: pd.DataFrame, t0, t1, bbox) -> pd.DataFrame:
+    """Per-ride rows (day, cell, vehicle, dwell, dist) for in-window, in-bbox ends."""
+    min_lat, max_lat, min_lng, max_lng = bbox
+    m = (
+        df["end_time"].notna()
+        & (df["end_time"] >= t0)
+        & (df["end_time"] < t1)
+        & df["end_h3"].notna()
+    )
+    lat = pd.to_numeric(df.get("end_lat"), errors="coerce")
+    lng = pd.to_numeric(df.get("end_lng"), errors="coerce")
+    m = m & lat.ge(min_lat) & lat.le(max_lat) & lng.ge(min_lng) & lng.le(max_lng)
+    sub = df.loc[m, ["end_time", "end_h3", "vehicle_id"]].copy()
+    sub["day"] = sub["end_time"].dt.normalize()
+    sub["cell"] = [
+        str(h3_cell_to_parent(hx, COMPARE_H3_RES)) for hx in sub["end_h3"].tolist()
+    ]
+    sub["dwell"] = (
+        pd.to_numeric(df.loc[m, "dwell_same_loc_mins"], errors="coerce")
+        .clip(upper=COMPARE_DWELL_CAP_MINS)
+        .values
+        if "dwell_same_loc_mins" in df.columns
+        else np.nan
+    )
+    sub["dist_next"] = (
+        pd.to_numeric(df.loc[m, "dist_to_next_start_m"], errors="coerce").values
+        if "dist_to_next_start_m" in df.columns
+        else np.nan
+    )
+    return sub
+
+
+def _cmp_matrix(sub: pd.DataFrame, days: list, cells: list) -> np.ndarray:
+    """cells x days end-count matrix (zero-filled)."""
+    day_ix = {d: i for i, d in enumerate(days)}
+    cell_ix = {c: i for i, c in enumerate(cells)}
+    mat = np.zeros((len(cells), len(days)), dtype=np.float64)
+    grouped = sub.groupby(["cell", "day"]).size()
+    for (c, d), n in grouped.items():
+        if c in cell_ix and d in day_ix:
+            mat[cell_ix[c], day_ix[d]] += n
+    return mat
+
+
+def _cmp_gini(counts: np.ndarray) -> float:
+    v = np.sort(np.asarray(counts, dtype=np.float64))
+    n = len(v)
+    tot = v.sum()
+    if n == 0 or tot <= 0:
+        return 0.0
+    cum = np.cumsum(v)
+    return float((n + 1 - 2 * (cum / tot).sum()) / n)
+
+
+def _cmp_outlier_days(day_totals: pd.Series) -> list:
+    """Low-volume anomaly days (holidays, storms) for the sensitivity duals.
+
+    A day flags when its total is a robust-z < -2 outlier (median/MAD based —
+    catches e.g. Midsummer at ~80% of median volume) or below half the median
+    (absolute floor for series too short for a stable MAD).
+    """
+    if not len(day_totals):
+        return []
+    med = float(day_totals.median())
+    if med <= 0:
+        return []
+    mad = float((day_totals - med).abs().median())
+    sd = 1.4826 * mad
+    out = []
+    for d, t in day_totals.items():
+        rz = (t - med) / sd if sd > 0 else 0.0
+        if rz < -2.0 or t < COMPARE_OUTLIER_FRAC * med:
+            out.append(d)
+    return out
+
+
+def _cmp_weekday_weights(post_days: list) -> dict[int, float]:
+    n = len(post_days)
+    out: dict[int, float] = {}
+    for d in post_days:
+        out[d.dayofweek] = out.get(d.dayofweek, 0.0) + 1.0 / n
+    return out
+
+
+def _cmp_day_weights(base_days: list, wk_weights: dict[int, float]) -> np.ndarray:
+    """Per-pre-day weights so the weighted pre day-mix matches the post weekday mix."""
+    by_dow: dict[int, int] = {}
+    for d in base_days:
+        by_dow[d.dayofweek] = by_dow.get(d.dayofweek, 0) + 1
+    w = np.array(
+        [wk_weights.get(d.dayofweek, 0.0) / by_dow[d.dayofweek] for d in base_days],
+        dtype=np.float64,
+    )
+    if w.sum() <= 0:
+        w = np.ones(len(base_days), dtype=np.float64) / max(len(base_days), 1)
+    else:
+        w = w / w.sum()
+    return w
+
+
+def _cmp_scalar_kpis(
+    mat: np.ndarray,
+    day_w: np.ndarray,
+    sub: pd.DataFrame,
+    days: list,
+    day_sel: np.ndarray | None = None,
+) -> dict:
+    """Scalar KPIs for one window given a cells x days matrix and day weights.
+
+    ``day_sel`` (indices with repetition allowed) supports the day-block
+    bootstrap: statistics are recomputed as if the selected days were the
+    observed sample.
+    """
+    if day_sel is None:
+        day_sel = np.arange(mat.shape[1])
+    w = day_w[day_sel]
+    w = w / w.sum() if w.sum() > 0 else np.ones(len(day_sel)) / max(len(day_sel), 1)
+    cell_counts = mat[:, day_sel] @ w  # weighted mean daily ends per cell
+    total = cell_counts.sum()
+    shares = cell_counts / total if total > 0 else cell_counts
+
+    day_keys = [days[i] for i in day_sel]
+    by_day = sub.groupby("day")
+    rides, actives, dwells, reloc_n, reloc_x = [], [], [], 0.0, 0.0
+    for d in day_keys:
+        try:
+            g = by_day.get_group(d)
+        except KeyError:
+            continue
+        rides.append(len(g))
+        actives.append(g["vehicle_id"].nunique())
+        dw = g["dwell"].dropna()
+        if len(dw):
+            dwells.append(dw.values)
+        dn = g["dist_next"].dropna()
+        reloc_n += len(dn)
+        reloc_x += float((dn > COMPARE_RELOC_THRESHOLD_M).sum())
+    all_dwells = np.concatenate(dwells) if dwells else np.array([])
+    return {
+        "shares": shares,
+        "cell_counts": cell_counts,
+        "gini": _cmp_gini(cell_counts),
+        "trips_per_active": float(
+            np.mean([r / a for r, a in zip(rides, actives) if a > 0])
+        )
+        if rides
+        else 0.0,
+        "median_dwell": float(np.median(all_dwells)) if len(all_dwells) else None,
+        "reloc_rate": (reloc_x / reloc_n) if reloc_n > 0 else None,
+    }
+
+
+def build_comparison_payload(
+    pre_bundle: dict,
+    post_bundle: dict,
+    station_count: int | None = None,
+    deploy_date: str | None = None,
+) -> dict:
+    """Compute the full pre/post deployment comparison. JS only renders this."""
+    warn: list[str] = []
+
+    # --- footprint: bbox intersection ---
+    a = [float(x) for x in pre_bundle["map_search_area"]]
+    b = [float(x) for x in post_bundle["map_search_area"]]
+    bbox = [max(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), min(a[3], b[3])]
+    if bbox[0] >= bbox[1] or bbox[2] >= bbox[3]:
+        return {
+            "enabled": False,
+            "reason": (
+                "The pre and post datasets cover non-overlapping areas — "
+                "they appear to be different cities. No comparison possible."
+            ),
+        }
+
+    df_pre = pre_bundle["df_rides"]
+    df_post = post_bundle["df_rides"]
+    post_t0, post_t1 = post_bundle["time_period"]
+    pre_t0, pre_t1 = pre_bundle["time_period"]
+
+    # --- burn-in: drop post days on/before the deployment-completion date ---
+    if deploy_date:
+        try:
+            dd = pd.Timestamp(deploy_date)
+            if post_t0 <= dd < post_t1:
+                post_t0 = (dd + pd.Timedelta(days=1)).to_pydatetime()
+                warn.append(f"burn_in:{deploy_date}")
+        except Exception:
+            pass
+
+    post_sub = _cmp_day_frame(df_post, post_t0, post_t1, bbox)
+    pre_sub_full = _cmp_day_frame(df_pre, pre_t0, pre_t1, bbox)
+    if post_sub.empty or pre_sub_full.empty:
+        return {
+            "enabled": False,
+            "reason": "Not enough in-area rides in the pre or post window to compare.",
+        }
+
+    def _drop_partial_days(sub: pd.DataFrame) -> pd.DataFrame:
+        """Remove boundary artifacts: days with <5% of the median daily volume.
+
+        These are typically partial first/last days of an export (a handful
+        of rides crossing midnight), not real low-demand days — genuine
+        anomalies like holidays stay in and are handled by the outlier-day
+        sensitivity instead.
+        """
+        totals = sub.groupby("day").size()
+        med = float(totals.median()) if len(totals) else 0.0
+        if med <= 0:
+            return sub
+        keep = {d for d, t in totals.items() if t >= 0.05 * med}
+        return sub[sub["day"].isin(keep)].copy()
+
+    post_sub = _drop_partial_days(post_sub)
+    pre_sub_full = _drop_partial_days(pre_sub_full)
+    if post_sub.empty or pre_sub_full.empty:
+        return {
+            "enabled": False,
+            "reason": "Not enough in-area rides in the pre or post window to compare.",
+        }
+
+    post_days = sorted(post_sub["day"].unique())
+    post_months = {d.month for d in post_days}
+
+    # --- baseline selection: same-season subset when available ---
+    pre_days_all = sorted(pre_sub_full["day"].unique())
+    season_days = [d for d in pre_days_all if d.month in post_months]
+    if len(season_days) >= COMPARE_SAME_SEASON_MIN_DAYS:
+        baseline_mode = "same_season"
+        base_days = season_days
+    else:
+        baseline_mode = "full_pre"
+        base_days = pre_days_all
+        # Only a real confound if the baseline actually spans other seasons.
+        if any(d.month not in post_months for d in base_days):
+            warn.append("seasonality")
+    pre_sub = pre_sub_full[pre_sub_full["day"].isin(base_days)].copy()
+
+    if len(post_days) < 30:
+        warn.append("short_post_window")
+
+    # --- outlier days (low-volume; catches holidays without a calendar) ---
+    pre_day_totals = pre_sub.groupby("day").size()
+    post_day_totals = post_sub.groupby("day").size()
+    pre_outliers = _cmp_outlier_days(pre_day_totals)
+    post_outliers = _cmp_outlier_days(post_day_totals)
+    if pre_outliers or post_outliers:
+        warn.append("outlier_days")
+
+    # --- union cell set + matrices ---
+    cells = sorted(set(pre_sub["cell"]).union(post_sub["cell"]))
+    cell_ix = {c: i for i, c in enumerate(cells)}
+    pre_mat = _cmp_matrix(pre_sub, base_days, cells)
+    post_mat = _cmp_matrix(post_sub, post_days, cells)
+
+    wk_w = _cmp_weekday_weights(post_days)
+    missing_dows = {d.dayofweek for d in post_days} - {d.dayofweek for d in base_days}
+    if missing_dows:
+        warn.append("weekday_gap")
+    pre_day_w = _cmp_day_weights(base_days, wk_w)
+    post_day_w = np.ones(len(post_days), dtype=np.float64) / len(post_days)
+
+    pre_k = _cmp_scalar_kpis(pre_mat, pre_day_w, pre_sub, base_days)
+    post_k = _cmp_scalar_kpis(post_mat, post_day_w, post_sub, post_days)
+
+    # --- pooled counts for significance (unweighted; conservative) ---
+    x_pre = pre_mat.sum(axis=1)
+    x_post = post_mat.sum(axis=1)
+    n_pre, n_post = float(x_pre.sum()), float(x_post.sum())
+    scale = n_post / n_pre if n_pre > 0 else 0.0
+    expected_post = x_pre * scale
+
+    # Per-cell significance uses day-block-bootstrap standard errors, computed
+    # in the bootstrap loop further below. Parametric z's failed calibration
+    # on real data: a binomial two-proportion z gave ~10% false positives on
+    # a null split, and a quasi-Poisson residual collapsed under city-wide
+    # dilution because daily counts have a heavier-than-Poisson,
+    # size-dependent variance. Resampling whole days captures that variance
+    # structure exactly. A robust background share-ratio gamma is fitted
+    # first (and re-fitted inside every bootstrap replicate) to absorb
+    # city-wide multiplicative drift, so "significant" means "this cell
+    # moved more than the background did".
+    sufficient = (x_post >= COMPARE_MIN_ENDS) | (expected_post >= COMPARE_MIN_ENDS)
+    s_pre = pre_k["shares"]
+    s_post = post_k["shares"]
+    delta_pp = (s_post - s_pre) * 100.0
+    _EPS_SHARE = 1e-9
+
+    def _gamma_share(sp: np.ndarray, sq: np.ndarray) -> float:
+        # Ratio only over cells with genuine pre mass — a near-empty
+        # resample would otherwise blow the ratio up through the epsilon.
+        m = sufficient & (sp > _EPS_SHARE) & (sq > _EPS_SHARE)
+        if m.sum() >= 10:
+            g = float(np.median(sq[m] / sp[m]))
+            return float(min(max(g, 0.2), 5.0))
+        return 1.0
+
+    gamma = _gamma_share(s_pre, s_post)
+    d_pt = s_post - gamma * s_pre
+
+    # --- pre ranking at compare resolution (from the optimiser's hex table) ---
+    hexm = pre_bundle["df_hex_metrics_all"]
+    cell_score: dict[str, float] = {}
+    cell_ends_rank: dict[str, float] = {}
+    best_member_rank: dict[str, float] = {}
+    if isinstance(hexm, pd.DataFrame) and not hexm.empty and "h3" in hexm.columns:
+        for _, row in hexm.iterrows():
+            try:
+                parent = str(h3_cell_to_parent(row["h3"], COMPARE_H3_RES))
+            except Exception:
+                continue
+            cell_score[parent] = cell_score.get(parent, 0.0) + float(
+                row.get("station_score", 0.0) or 0.0
+            )
+            cell_ends_rank[parent] = cell_ends_rank.get(parent, 0.0) + float(
+                row.get("end_rides", 0.0) or 0.0
+            )
+            r = row.get("rank")
+            if pd.notna(r):
+                best_member_rank[parent] = min(
+                    best_member_rank.get(parent, float("inf")), float(r)
+                )
+    order = sorted(
+        cells,
+        key=lambda c: (-cell_score.get(c, 0.0), -cell_ends_rank.get(c, 0.0), c),
+    )
+    pre_rank = {c: i + 1 for i, c in enumerate(order)}
+
+    # --- rank-capture curve (fixed pre-optimiser ordering for ALL series) ---
+    # The band is the 95% day-block-bootstrap range of the PRE curve under the
+    # same fixed ordering: "capture levels consistent with pre-period
+    # day-to-day noise". A post curve outside it indicates a real shift.
+    # (Filled from the bootstrap loop below.)
+    k_max = min(COMPARE_MAX_CURVE_K, len(cells))
+    order_ix = np.array([cell_ix[c] for c in order[:k_max]])
+    c_pre = np.cumsum(s_pre[order_ix]) * 100.0
+    c_post = np.cumsum(s_post[order_ix]) * 100.0
+    band_lo = band_hi = None
+
+    k_hat = int(station_count) if station_count else None
+
+    post_dwell_by_cell = post_sub.groupby("cell")["dwell"].median()
+    pre_dwell_by_cell = pre_sub.groupby("cell")["dwell"].median()
+    lift = np.where(s_pre > 0, (s_post - s_pre) / np.maximum(s_pre, 1e-12), np.inf)
+
+    def _cand_row(i: int) -> dict:
+        c = cells[i]
+        lat, lng = h3_cell_to_latlng(c)
+        return {
+            "cell": c,
+            "lat": float(lat),
+            "lng": float(lng),
+            "x_pre": float(x_pre[i]),
+            "x_post": float(x_post[i]),
+            "s_pre_pct": float(s_pre[i] * 100.0),
+            "s_post_pct": float(s_post[i] * 100.0),
+            "delta_pp": float(delta_pp[i]),
+            "lift_pct": float(lift[i] * 100.0) if np.isfinite(lift[i]) else None,
+            "z": float(z[i]),
+            "pre_rank": int(pre_rank.get(c, 0)),
+            "best_member_rank": (
+                int(best_member_rank[c]) if c in best_member_rank else None
+            ),
+            "dwell_median_pre": (
+                float(pre_dwell_by_cell[c]) if c in pre_dwell_by_cell.index and pd.notna(pre_dwell_by_cell[c]) else None
+            ),
+            "dwell_median_post": (
+                float(post_dwell_by_cell[c]) if c in post_dwell_by_cell.index and pd.notna(post_dwell_by_cell[c]) else None
+            ),
+            "activated": bool(activated[i]),
+            "in_rank_window": bool(
+                k_hat is not None and pre_rank.get(c, 10**9) <= 3 * k_hat
+            ),
+        }
+
+    # --- day-block weekday-stratified bootstrap ---
+    # One loop yields: CIs for scalar KPI deltas, the pre-curve noise band,
+    # and the per-cell standard errors that drive the significance classes.
+    rng = np.random.default_rng(20260614)
+
+    def _strata(days_list):
+        s: dict[int, list[int]] = {}
+        for i, d in enumerate(days_list):
+            s.setdefault(d.dayofweek, []).append(i)
+        strata = list(s.values())
+        # A size-1 stratum always redraws the same day and contributes zero
+        # bootstrap variance — with short windows that silently deflates
+        # every SE. Weekday mix is already handled by the day weights, so
+        # fall back to plain day resampling when strata are thin.
+        if strata and min(len(ix) for ix in strata) < 3:
+            return [list(range(len(days_list)))]
+        return strata
+
+    pre_strata = _strata(base_days)
+    post_strata = _strata(post_days)
+    cap_k = min(k_hat or 20, k_max)
+
+    def _capture_at_k(shares):
+        return float(np.cumsum(shares[order_ix])[cap_k - 1] * 100.0) if cap_k >= 1 else 0.0
+
+    boot: dict[str, list[float]] = {
+        "gini": [], "capture": [], "reloc": [], "tpa": [], "dwell": []
+    }
+    pre_curves: list[np.ndarray] = []
+    d_sum = np.zeros(len(cells), dtype=np.float64)
+    d_sq = np.zeros(len(cells), dtype=np.float64)
+    n_eff = 0
+    n_degenerate = 0
+    full_pre_total = pre_mat.sum()
+    full_post_total = post_mat.sum()
+    for it in range(COMPARE_BOOT_ITERS):
+        pre_sel = np.concatenate(
+            [rng.choice(ix, size=len(ix), replace=True) for ix in pre_strata]
+        )
+        post_sel = np.concatenate(
+            [rng.choice(ix, size=len(ix), replace=True) for ix in post_strata]
+        )
+        # A resample landing mostly on near-empty days yields meaningless
+        # shares (and once poisoned the SE accumulators) — skip it.
+        if (
+            pre_mat[:, pre_sel].sum() < 0.25 * full_pre_total * len(pre_sel) / max(pre_mat.shape[1], 1)
+            or post_mat[:, post_sel].sum() < 0.25 * full_post_total * len(post_sel) / max(post_mat.shape[1], 1)
+        ):
+            n_degenerate += 1
+            continue
+        pk = _cmp_scalar_kpis(pre_mat, pre_day_w, pre_sub, base_days, pre_sel)
+        qk = _cmp_scalar_kpis(post_mat, post_day_w, post_sub, post_days, post_sel)
+        pre_curves.append(np.cumsum(pk["shares"][order_ix]) * 100.0)
+        d_boot = qk["shares"] - _gamma_share(pk["shares"], qk["shares"]) * pk["shares"]
+        d_sum += d_boot
+        d_sq += d_boot * d_boot
+        n_eff += 1
+        boot["gini"].append(qk["gini"] - pk["gini"])
+        boot["capture"].append(_capture_at_k(qk["shares"]) - _capture_at_k(pk["shares"]))
+        if pk["reloc_rate"] is not None and qk["reloc_rate"] is not None:
+            boot["reloc"].append(qk["reloc_rate"] - pk["reloc_rate"])
+        boot["tpa"].append(qk["trips_per_active"] - pk["trips_per_active"])
+        if pk["median_dwell"] is not None and qk["median_dwell"] is not None:
+            boot["dwell"].append(qk["median_dwell"] - pk["median_dwell"])
+    if n_eff < 50:
+        return {
+            "enabled": False,
+            "reason": "Too few valid bootstrap resamples — the datasets have too few usable days.",
+        }
+    pre_curves_arr = np.vstack(pre_curves)
+    band_lo = np.percentile(pre_curves_arr, 2.5, axis=0)
+    band_hi = np.percentile(pre_curves_arr, 97.5, axis=0)
+
+    # --- per-cell significance from bootstrap SEs ---
+    d_mean = d_sum / n_eff
+    d_var = np.maximum(d_sq / n_eff - d_mean**2, 0.0)
+    d_se = np.sqrt(d_var)
+    z = np.where(d_se > 0, d_pt / np.where(d_se > 0, d_se, 1.0), 0.0)
+
+    # SEs are estimated from a small number of days, so use t-quantiles with
+    # day-based degrees of freedom instead of fixed normal cutoffs (with a
+    # months-long pre window df is large and these converge to 1.96 / 3.0).
+    from scipy.stats import t as _t_dist
+
+    df_days = max(len(base_days) + len(post_days) - 2, 3)
+    z_color_thr = float(_t_dist.ppf(0.975, df_days) / 1.959964 * COMPARE_Z_COLOR)
+    z_cand_thr = float(_t_dist.ppf(0.99865, df_days) / 3.0 * COMPARE_Z_CANDIDATE)
+
+    cls = np.where(
+        ~sufficient,
+        "insufficient",
+        np.where(
+            z >= z_color_thr,
+            "sig_up",
+            np.where(z <= -z_color_thr, "sig_down", "ns"),
+        ),
+    )
+
+    # --- station candidates (inferred when count unknown) ---
+    activated = (
+        (z >= z_cand_thr)
+        & (lift >= COMPARE_MIN_LIFT)
+        & (x_post >= COMPARE_MIN_ENDS)
+    )
+    # No hard pre-rank filter: real deployments skip ranks ("next best spot"),
+    # so an activated cell far down the pre ranking is still a legitimate
+    # candidate — the row is annotated instead (in_rank_window) and the user
+    # confirms/rejects.
+    cand_ix = [i for i in np.argsort(-z) if activated[i]][:COMPARE_MAX_CANDIDATES]
+    declined_ix = [i for i in np.argsort(z) if cls[i] == "sig_down"][:20]
+    candidates = [_cand_row(i) for i in cand_ix]
+    declined = [_cand_row(i) for i in declined_ix]
+
+    # --- guard metrics ---
+    # M7 off-station retention: pre top-quintile demand cells excluding candidates.
+    cand_set = {cells[i] for i in cand_ix}
+    q80 = np.quantile(s_pre[s_pre > 0], 0.8) if (s_pre > 0).any() else 0.0
+    guard_ix = [
+        i for i, c in enumerate(cells) if s_pre[i] >= q80 and c not in cand_set
+    ]
+    retention = (
+        float(s_post[guard_ix].sum() / max(s_pre[guard_ix].sum(), 1e-12))
+        if guard_ix
+        else None
+    )
+
+    # M8 start-side symmetry at candidate cells.
+    def _start_share(df, t0, t1, days_used):
+        min_lat, max_lat, min_lng, max_lng = bbox
+        m = (
+            df["start_time"].notna()
+            & (df["start_time"] >= t0)
+            & (df["start_time"] < t1)
+            & df.get("start_h3", pd.Series(index=df.index, dtype=object)).notna()
+        )
+        lat = pd.to_numeric(df.get("start_lat"), errors="coerce")
+        lng = pd.to_numeric(df.get("start_lng"), errors="coerce")
+        m = m & lat.ge(min_lat) & lat.le(max_lat) & lng.ge(min_lng) & lng.le(max_lng)
+        sub = df.loc[m, ["start_time", "start_h3"]].copy()
+        sub["day"] = sub["start_time"].dt.normalize()
+        sub = sub[sub["day"].isin(set(days_used))]
+        sub["cell"] = [
+            str(h3_cell_to_parent(hx, COMPARE_H3_RES)) for hx in sub["start_h3"]
+        ]
+        tot = len(sub)
+        if tot == 0:
+            return None
+        in_cand = float(sub["cell"].isin(cand_set).sum())
+        return in_cand / tot
+
+    start_share_pre = _start_share(df_pre, pre_t0, pre_t1, base_days)
+    start_share_post = _start_share(df_post, post_t0, post_t1, post_days)
+
+    def _ci(key):
+        v = boot[key]
+        if len(v) < 50:
+            return None
+        return [float(np.percentile(v, 2.5)), float(np.percentile(v, 97.5))]
+
+    # --- sensitivity: point estimates excluding outlier days ---
+    pre_keep = np.array(
+        [i for i, d in enumerate(base_days) if d not in set(pre_outliers)]
+    )
+    post_keep = np.array(
+        [i for i, d in enumerate(post_days) if d not in set(post_outliers)]
+    )
+    sens = None
+    if len(pre_keep) and len(post_keep) and (
+        len(pre_keep) < len(base_days) or len(post_keep) < len(post_days)
+    ):
+        pk = _cmp_scalar_kpis(pre_mat, pre_day_w, pre_sub, base_days, pre_keep)
+        qk = _cmp_scalar_kpis(post_mat, post_day_w, post_sub, post_days, post_keep)
+        sens = {
+            "gini_delta": qk["gini"] - pk["gini"],
+            "capture_delta": _capture_at_k(qk["shares"]) - _capture_at_k(pk["shares"]),
+            "reloc_delta": (
+                qk["reloc_rate"] - pk["reloc_rate"]
+                if pk["reloc_rate"] is not None and qk["reloc_rate"] is not None
+                else None
+            ),
+            "tpa_delta": qk["trips_per_active"] - pk["trips_per_active"],
+        }
+
+    # --- dwell censoring guard ---
+    pre_dwell_share = float(pre_sub["dwell"].notna().mean())
+    post_dwell_share = float(post_sub["dwell"].notna().mean())
+    if abs(pre_dwell_share - post_dwell_share) > 0.10:
+        warn.append("dwell_censoring")
+
+    # --- cells GeoJSON (compare resolution polygons) ---
+    features = []
+    for i, c in enumerate(cells):
+        if x_pre[i] == 0 and x_post[i] == 0:
+            continue
+        boundary = h3_cell_to_boundary(c)
+        coords = [[lng, lat] for lat, lng in boundary]
+        if coords and coords[0] != coords[-1]:
+            coords.append(coords[0])
+        lat_c, lng_c = h3_cell_to_latlng(c)
+        features.append(
+            {
+                "type": "Feature",
+                "geometry": {"type": "Polygon", "coordinates": [coords]},
+                "properties": {
+                    "cell": c,
+                    "lat": float(lat_c),
+                    "lng": float(lng_c),
+                    "x_pre": float(x_pre[i]),
+                    "x_post": float(x_post[i]),
+                    "s_pre_pct": float(s_pre[i] * 100.0),
+                    "s_post_pct": float(s_post[i] * 100.0),
+                    "delta_pp": float(delta_pp[i]),
+                    "z": float(z[i]),
+                    "cls": str(cls[i]),
+                    "pre_rank": int(pre_rank.get(c, 0)),
+                },
+            }
+        )
+
+    kpis = {
+        "capture": {
+            "label": f"Top-{cap_k} recommended-cell demand capture",
+            "pre": _capture_at_k(s_pre),
+            "post": _capture_at_k(s_post),
+            "unit": "%",
+            "ci": _ci("capture"),
+            "better": "up",
+        },
+        "gini": {
+            "label": "Demand concentration (Gini)",
+            "pre": pre_k["gini"],
+            "post": post_k["gini"],
+            "unit": "",
+            "ci": _ci("gini"),
+            "better": "up",
+        },
+        "reloc": {
+            "label": f"Relocation rate (next start >{int(COMPARE_RELOC_THRESHOLD_M)} m)",
+            "pre": pre_k["reloc_rate"],
+            "post": post_k["reloc_rate"],
+            "unit": "share",
+            "ci": _ci("reloc"),
+            "better": "down",
+        },
+        "tpa": {
+            "label": "Trips per active vehicle per day",
+            "pre": pre_k["trips_per_active"],
+            "post": post_k["trips_per_active"],
+            "unit": "",
+            "ci": _ci("tpa"),
+            "better": None,
+        },
+        "dwell": {
+            "label": "Median same-spot dwell (mins, capped 24 h)",
+            "pre": pre_k["median_dwell"],
+            "post": post_k["median_dwell"],
+            "unit": "min",
+            "ci": _ci("dwell"),
+            "better": None,
+        },
+    }
+
+    n_sufficient = int(sufficient.sum())
+    n_sig = int(((cls == "sig_up") | (cls == "sig_down")).sum())
+
+    return _clean_nan(
+        {
+            "enabled": True,
+            "method": {
+                "compare_res": COMPARE_H3_RES,
+                "bbox": bbox,
+                "baseline_mode": baseline_mode,
+                "pre_label": pre_bundle.get("label", "Pre"),
+                "post_label": post_bundle.get("label", "Post"),
+                "pre_window": [str(base_days[0].date()), str(base_days[-1].date())],
+                "post_window": [str(post_days[0].date()), str(post_days[-1].date())],
+                "n_pre_days": len(base_days),
+                "n_post_days": len(post_days),
+                "pre_outlier_days": [str(d.date()) for d in pre_outliers],
+                "post_outlier_days": [str(d.date()) for d in post_outliers],
+                "weekday_reweighted": True,
+                "z_color": COMPARE_Z_COLOR,
+                "z_candidate": COMPARE_Z_CANDIDATE,
+                "se_method": "weekday_stratified_day_block_bootstrap",
+                "boot_iters": COMPARE_BOOT_ITERS,
+                "background_ratio": round(float(gamma), 3),
+                "z_color_effective": round(z_color_thr, 2),
+                "z_candidate_effective": round(z_cand_thr, 2),
+                "min_lift": COMPARE_MIN_LIFT,
+                "min_ends": COMPARE_MIN_ENDS,
+                "station_count": k_hat,
+                "deploy_date": deploy_date,
+                "k_used": cap_k,
+                "stations_inferred": k_hat is None,
+                "warnings": warn,
+            },
+            "denominators": {
+                "pre": {
+                    "rides": int(n_pre),
+                    "dwells_defined": int(pre_sub["dwell"].notna().sum()),
+                    "mean_daily_active": float(
+                        pre_sub.groupby("day")["vehicle_id"].nunique().mean()
+                    ),
+                },
+                "post": {
+                    "rides": int(n_post),
+                    "dwells_defined": int(post_sub["dwell"].notna().sum()),
+                    "mean_daily_active": float(
+                        post_sub.groupby("day")["vehicle_id"].nunique().mean()
+                    ),
+                },
+            },
+            "kpis": kpis,
+            "sensitivity": sens,
+            "guards": {
+                "off_station_retention": retention,
+                "start_share_pre": start_share_pre,
+                "start_share_post": start_share_post,
+            },
+            "curve": {
+                "k": list(range(1, k_max + 1)),
+                "pre": [float(v) for v in c_pre],
+                "post": [float(v) for v in c_post],
+                "band_lo": [float(v) for v in band_lo] if band_lo is not None else None,
+                "band_hi": [float(v) for v in band_hi] if band_hi is not None else None,
+                "order": order[:k_max],
+            },
+            "candidates": candidates,
+            "declined": declined,
+            "cells_fc": {"type": "FeatureCollection", "features": features},
+            "stats": {
+                "n_cells": len(cells),
+                "n_sufficient": n_sufficient,
+                "n_significant": n_sig,
+            },
+        }
+    )
 
 
 def build_analysis_bundle(
