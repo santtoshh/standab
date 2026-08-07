@@ -770,11 +770,34 @@ def build(out_path: Path) -> Path:
                  f'whether docking actually fell. Treat the shaded part as '
                  f'unknown, not as a drop.</div>')
 
+    o.append("<h3>What happens to the trips that end at a station</h3>")
+    o.append(f'<p class="note">Leaving a scooter beside a rack is not the same '
+             f'as putting it on the rack. Of the {rides:,} trips in the period, '
+             f'{ft["ends"]:,} ended within {S.DOCK_RADIUS_M:.0f} metres of a '
+             f'station. Here is what happened to those, all bars on the same '
+             f'scale.</p>')
+    o.append(funnel_chart([
+        {"label": "Ended at a station",
+         "value": ft["ends"],
+         "note": f"within {S.DOCK_RADIUS_M:.0f} metres of one", "color": BLUE},
+        {"label": "Put on a charging point",
+         "value": ft30["docked_or_charged"],
+         "note": "at that same station, within 30 minutes", "color": ORANGE},
+        {"label": "Took charge",
+         "value": ft30["charged"],
+         "note": "drew power, not just docked", "color": GREEN},
+    ], share_label="of the trips above"))
+    o.append(f'<div class="takeaway">About <strong>1 in 4</strong> trips that '
+             f'end at a station finish with the scooter on a charging point, '
+             f'and about <strong>1 in 5</strong> with it actually taking charge. '
+             f'The remaining three quarters are left beside the rack rather '
+             f'than on it.</div>')
+
     n_events = len(chg.sessions)
     n_docks_only = len(chg.docks)
     o.append("<h3>How often a scooter was actually put on a charging point</h3>")
-    o.append(f'<p class="note">The figures above count trips. This counts what '
-             f'the stations did, whether the scooter was ridden there or '
+    o.append(f'<p class="note">The chart above counts trips. This one counts '
+             f'what the stations did, whether the scooter was ridden there or '
              f'brought there. Over the {days} days a scooter was put on a point '
              f'<strong>{n_events:,}</strong> times, about '
              f'{n_events / days:.0f} a day.</p>')
