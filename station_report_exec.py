@@ -450,10 +450,6 @@ def build(out_path: Path) -> Path:
     ft = S.site_follow_through(df, chg, sites)
     ft30, ft24 = ft["windows"][30.0], ft["windows"][1440.0]
 
-    # The stations' own output, whoever brought the scooter. How it got there
-    # is a separate question and not one this report answers.
-    n_charge_sessions = len(chg.charges)
-
     # Same measure at the wider radius, computed here so both live side by side.
     _dw = pd.DataFrame({
         "week": df["week"].values,
@@ -793,31 +789,15 @@ def build(out_path: Path) -> Path:
              f'The remaining three quarters are left beside the rack rather '
              f'than on it.</div>')
 
-    n_events = len(chg.sessions)
-    n_docks_only = len(chg.docks)
-    o.append("<h3>How often a scooter was actually put on a charging point</h3>")
-    o.append(f'<p class="note">The chart above counts trips. This one counts '
-             f'what the stations did, whether the scooter was ridden there or '
-             f'brought there. Over the {days} days a scooter was put on a point '
-             f'<strong>{n_events:,}</strong> times, about '
-             f'{n_events / days:.0f} a day.</p>')
-    o.append(funnel_chart([
-        {"label": "Put on a charging point",
-         "value": n_events,
-         "note": f"about {n_events / days:.0f} times a day", "color": BLUE},
-        {"label": "Took charge",
-         "value": n_charge_sessions,
-         "note": f"delivered {supplied:,.0f} kWh between them", "color": GREEN},
-        {"label": "Took no charge",
-         "value": n_docks_only,
-         "note": "on a point but drew nothing", "color": MUTED},
-    ], share_label="of the times above"))
-    o.append(f'<div class="takeaway"><strong>{n_charge_sessions:,}</strong> of '
-             f'those, about {100.0 * n_charge_sessions / n_events:.0f} in every '
-             f'100, drew power and together delivered the full '
-             f'<strong>{supplied:,.0f} kWh</strong>. The other '
-             f'{n_docks_only:,} sat on a point and drew nothing. The data does '
-             f'not say why.</div>')
+    # The station-side view of the same events lived here and was cut: it
+    # largely restated the funnel, and its total (8,363 dock events) sits so
+    # close to the funnel's (8,553 trips) that the two invite being read as one
+    # number. The scale of station activity is kept as one line instead.
+    o.append(f'<p class="note">Counted from the stations rather than the trips, '
+             f'a scooter was put on a point <strong>{len(chg.sessions):,}</strong> '
+             f'times over the {days} days, about {len(chg.sessions) / days:.0f} a '
+             f'day. Most of those arrive without having just been ridden '
+             f'there.</p>')
     o.append("</div>")
 
     # ---- stations ---------------------------------------------------------
