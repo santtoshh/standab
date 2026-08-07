@@ -165,6 +165,8 @@ h1{font-size:32px;line-height:1.2;margin:0 0 6px;letter-spacing:-.02em}
 .sub{color:#5b5b57;font-size:16px}
 .card{background:#fcfcfb;border:1px solid #e6e5df;border-radius:14px;padding:26px 28px;margin-bottom:20px}
 h2{font-size:22px;margin:0 0 4px;letter-spacing:-.01em}
+h3{font-size:16px;margin:26px 0 4px;letter-spacing:-.01em}
+.note{font-size:15px;color:#5b5b57;margin:0 0 6px}
 .lead{font-size:17px;color:#3a3a36;margin:0 0 20px}
 .heroes{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px;margin-bottom:20px}
 .hero{background:#fcfcfb;border:1px solid #e6e5df;border-radius:14px;padding:20px 22px}
@@ -231,6 +233,16 @@ def build(out_path: Path) -> Path:
     util_used = [float(utf.loc[w, "rides_per_vehicle_per_day"]) for w in wdf.index]
     util_fleet = [float(utf.loc[w, "rides_per_fleet_vehicle_per_day"]) for w in wdf.index]
 
+    # The stations came online part-way through the first week, so that week's
+    # supply is not a full week's worth. Quote the steady-state range only.
+    chg_start = chg.sessions["started"].min()
+    # Compare timestamps, not dates: the first session lands part-way through
+    # its own week, so that week must fall out of the range.
+    sup_full = [s for w, s in zip(wdf.index, sup_wv)
+                if w >= chg_start and not np.isnan(s)]
+    if not sup_full:
+        sup_full = [s for s in sup_wv if not np.isnan(s)]
+
     # The busiest week is where the coverage story is clearest: supply is near
     # constant, so the share covered bottoms out exactly when demand peaks.
     _busy = int(np.argmax(util_used))
@@ -250,6 +262,25 @@ def build(out_path: Path) -> Path:
     site_val = [int(v) for v in pst["buffer_ends"]]
     live_sites = int((pst["buffer_ends"] > 10).sum())
 
+    # Rack-level detail behind each location, so the grouping is auditable:
+    # which physical racks were merged, how many charging points they add up
+    # to, and what each location delivered.
+    kwh_by_rack = chg.sessions.groupby("rack_id")["kwh"].sum()
+    by_name = {s.name: s for s in sites}
+    site_rows = []
+    for lbl, (_, row) in zip(site_lbl, pst.iterrows()):
+        site = by_name[str(row["site"])]
+        members = [racks[i] for i in site.rack_indices]
+        site_rows.append({
+            "label": lbl,
+            "rack_ids": ", ".join(r.rack_id.split("-")[-1] for r in members),
+            "n_racks": len(members),
+            "points": sum(r.receptacles for r in members),
+            "ends": int(row["buffer_ends"]),
+            "kwh": float(sum(kwh_by_rack.get(r.rack_id, 0.0) for r in members)),
+        })
+    merged_sites = sum(1 for r in site_rows if r["n_racks"] > 1)
+
     swaps_share = 100.0 - catered
     per_day_need = need_total / days
     per_day_sup = supplied / days
@@ -257,11 +288,11 @@ def build(out_path: Path) -> Path:
     o: list[str] = []
     o.append('<!doctype html><html lang="en"><head><meta charset="utf-8">'
              '<meta name="viewport" content="width=device-width,initial-scale=1">'
-             f'<title>Vaasa station pilot &mdash; summary</title><style>{CSS}</style>'
+             f'<title>Vaasa station pilot: summary</title><style>{CSS}</style>'
              '</head><body><div class="wrap">')
 
     o.append('<div class="head">')
-    o.append("<h1>Vaasa charging stations &mdash; how the pilot is doing</h1>")
+    o.append("<h1>Vaasa charging stations: how the pilot is doing</h1>")
     o.append(f'<div class="sub">{start.strftime("%-d %B")} to '
              f'{end.strftime("%-d %B %Y")} &nbsp;&middot;&nbsp; {days} days '
              f'&nbsp;&middot;&nbsp; {rides:,} scooter trips &nbsp;&middot;&nbsp; '
@@ -280,8 +311,8 @@ def build(out_path: Path) -> Path:
              f'else in the city</div></div>')
     o.append(f'<div class="hero"><div class="n">{veh_share:.0f}%</div>'
              f'<div class="t">of scooters visit a station in a given week</div>'
-             f'<div class="s">so most of the fleet does reach a station '
-             f'sometimes</div></div>')
+             f'<div class="s">so most of the fleet does reach a station at '
+             f'some point</div></div>')
     o.append(f'<div class="hero"><div class="n">{supplied:,.0f} kWh</div>'
              f'<div class="t">charged at the stations so far</div>'
              f'<div class="s">enough energy for about '
@@ -304,27 +335,25 @@ def build(out_path: Path) -> Path:
                         [{"values": need_w, "color": BLUE},
                          {"values": sup_wv, "color": ORANGE}],
                         y_suffix="", fmt=lambda v: f"{v:,.0f}"))
-    o.append(f'<div class="takeaway">The gap between the two lines is energy '
-             f'still being handled by battery swaps &mdash; about '
-             f'<strong>{per_day_need - per_day_sup:,.0f} kWh a day</strong>. '
-             f'Closing it is what more stations, or more use of the ones we have, '
-             f'would buy us.</div>')
+    o.append(f'<div class="takeaway">The gap between the two lines is energy we '
+             f'still handle by swapping batteries. That is about '
+             f'<strong>{per_day_need - per_day_sup:,.0f} kWh a day</strong>.</div>')
 
-    o.append(f'<div class="takeaway">Notice how flat the orange line is. The '
-             f'stations deliver roughly the same amount of energy every week '
-             f'&mdash; between {min(sup_wv):,.0f} and {max(sup_wv):,.0f} kWh '
-             f'&mdash; while what the fleet needs swings from '
-             f'{min(need_w):,.0f} to {max(need_w):,.0f} kWh.</div>')
+    o.append(f'<div class="takeaway">The orange line is almost flat. Once the '
+             f'stations were fully running they gave out about the same energy '
+             f'every week, between {min(sup_full):,.0f} and '
+             f'{max(sup_full):,.0f} kWh. What the fleet needs swings a lot '
+             f'more, from {min(need_w):,.0f} to {max(need_w):,.0f} kWh.</div>')
     o.append("</div>")
 
     # ---- utilisation vs coverage -------------------------------------------
     o.append('<div class="card">')
     o.append("<h2>When the city gets busier, do the stations keep up?</h2>")
-    o.append(f'<p class="lead">&ldquo;Utilisation&rdquo; is how many trips each '
-             f'scooter does per day. The busier the fleet, the more energy it '
-             f'burns &mdash; so this asks whether station coverage holds up '
-             f'when demand rises.</p>')
-    o.append('<div class="chartttl">How hard each scooter is working &mdash; trips per day</div>')
+    o.append(f'<p class="lead">Utilisation is how many trips each scooter does '
+             f'per day. The busier the fleet, the more energy it burns. So the '
+             f'question is whether station coverage holds up when demand '
+             f'rises.</p>')
+    o.append('<div class="chartttl">How hard each scooter is working, trips per day</div>')
     o.append('<div class="legend">'
              f'<span><i style="background:{BLUE}"></i>Per scooter that was in use</span>'
              f'<span><i style="background:{MUTED}"></i>Per scooter in the whole fleet</span>'
@@ -337,14 +366,13 @@ def build(out_path: Path) -> Path:
     o.append(line_chart(wk_labels, [{"values": cat_w, "color": GREEN}],
                         y_suffix="%", y_max=60, fmt=lambda v: f"{v:,.0f}"))
     o.append(f'<div class="takeaway warn">The two move in opposite directions. '
-             f'In the busiest week ({busy_wk}), when each scooter was doing '
-             f'<strong>{busy_util:.1f} trips a day</strong>, the stations '
+             f'In the busiest week ({busy_wk}) each scooter did '
+             f'<strong>{busy_util:.1f} trips a day</strong>, and the stations '
              f'covered only <strong>{busy_cat:.0f}%</strong> of the energy '
-             f'needed. In quieter weeks they cover a third or more. Because the '
-             f'stations give out a roughly fixed amount of energy each week, '
-             f'<strong>coverage falls exactly when the city needs it most</strong>. '
-             f'More capacity &mdash; more stations, or faster turnover at the '
-             f'ones we have &mdash; is what would change that.</div>')
+             f'needed. In quieter weeks they cover a third or more. The '
+             f'stations give out about the same energy every week, so '
+             f'<strong>coverage drops exactly when the city needs it '
+             f'most</strong>.</div>')
     o.append("</div>")
 
     # ---- docking ----------------------------------------------------------
@@ -356,14 +384,14 @@ def build(out_path: Path) -> Path:
     o.append(line_chart(wk_labels, [{"values": dock_w, "color": BLUE}],
                         y_suffix="%", y_max=14, fmt=lambda v: f"{v:,.0f}",
                         band_from=shade_from,
-                        band_note="less reliable — see note"))
+                        band_note="less reliable, see note"))
     if shade_from is not None:
         o.append(f'<div class="takeaway warn">Roughly '
                  f'<strong>{dock_rate:.0f} trips in every 100</strong> end at a '
-                 f'station. The last few weeks look lower, but in those weeks '
-                 f'many more scooters failed to report where they were parked, '
-                 f'so we cannot say whether docking actually fell. Treat the '
-                 f'shaded part as unknown, not as a decline.</div>')
+                 f'station. The last few weeks look lower, but in those weeks a '
+                 f'lot more scooters did not report where they were parked. So '
+                 f'we cannot say whether docking actually fell. Treat the '
+                 f'shaded part as unknown, not as a drop.</div>')
     o.append("</div>")
 
     # ---- stations ---------------------------------------------------------
@@ -374,8 +402,34 @@ def build(out_path: Path) -> Path:
     o.append(bar_chart(site_lbl, site_val, color=BLUE, fmt=lambda v: f"{v:,.0f}"))
     o.append(f'<div class="takeaway"><strong>{live_sites} of {len(sites)}</strong> '
              f'locations get real traffic, and the busiest three take a large '
-             f'share of it. The quietest ones are worth a look on the ground &mdash; '
-             f'some are simply newer than the rest.</div>')
+             f'share of it. Some of the quiet ones were only installed '
+             f'recently.</div>')
+
+    o.append("<h3>How the racks group into locations</h3>")
+    o.append(f'<p class="note">We have {len(racks)} racks in the city, but some '
+             f'sit right next to each other. Anything within '
+             f'{S.MERGE_RADIUS_M:.0f} metres of another rack counts as one '
+             f'location, because to a rider they are the same place. That '
+             f'gives <strong>{len(sites)} locations</strong>, '
+             f'{merged_sites} of which are made up of more than one rack.</p>')
+    o.append("<table><thead><tr><th>Location</th><th>Racks in it</th>"
+             "<th class='num'>Racks</th><th class='num'>Charging points</th>"
+             "<th class='num'>Trips ending here</th>"
+             "<th class='num'>Energy given (kWh)</th></tr></thead><tbody>")
+    for r in site_rows:
+        o.append(f'<tr><td><strong>{esc(r["label"])}</strong></td>'
+                 f'<td>{esc(r["rack_ids"])}</td>'
+                 f'<td class="num">{r["n_racks"]}</td>'
+                 f'<td class="num">{r["points"]}</td>'
+                 f'<td class="num">{r["ends"]:,}</td>'
+                 f'<td class="num">{r["kwh"]:,.0f}</td></tr>')
+    o.append(f'<tr><td colspan="2"><strong>Total</strong></td>'
+             f'<td class="num"><strong>{len(racks)}</strong></td>'
+             f'<td class="num"><strong>{sum(r["points"] for r in site_rows)}</strong></td>'
+             f'<td class="num"><strong>{sum(r["ends"] for r in site_rows):,}</strong></td>'
+             f'<td class="num"><strong>{sum(r["kwh"] for r in site_rows):,.0f}</strong></td>'
+             f'</tr>')
+    o.append("</tbody></table>")
     o.append("</div>")
 
     # ---- fleet reach ------------------------------------------------------
@@ -385,34 +439,43 @@ def build(out_path: Path) -> Path:
     o.append(line_chart(wk_labels, [{"values": vehs_w, "color": GREEN}],
                         y_suffix="%", y_max=100, fmt=lambda v: f"{v:,.0f}"))
     o.append(f'<div class="takeaway good">About <strong>{veh_share:.0f}% of '
-             f'scooters</strong> touch a station in a normal week, so the '
-             f'network already reaches a good part of the fleet. The gap is '
-             f'how often trips actually <em>finish</em> there.</div>')
+             f'scooters</strong> reach a station in a normal week. The network '
+             f'already covers a good part of the fleet. The gap is how often '
+             f'trips actually <em>finish</em> there.</div>')
     o.append("</div>")
 
-    # ---- what to do -------------------------------------------------------
+    # ---- summary of findings (statements of fact, no recommendations) ------
     o.append('<div class="card">')
-    o.append("<h2>What this suggests</h2>")
+    o.append("<h2>What the numbers show</h2>")
     o.append('<ul class="acts">')
-    o.append(f"<li><strong>Give riders a reason to finish at a station.</strong> "
-             f"Only {dock_rate:.0f} trips in 100 end at one today. A small "
-             f"in-app incentive for ending a trip at a station is the cheapest "
-             f"way to move every other number on this page.</li>")
-    o.append(f"<li><strong>The stations already pay their way operationally.</strong> "
-             f"They cover {catered:.0f}% of the fleet&rsquo;s energy, which is "
-             f"charging work the team no longer does by hand.</li>")
-    o.append("<li><strong>Look at the quietest locations.</strong> A few sites "
-             "get very little traffic. Some were installed only recently; the "
-             "others may be in the wrong place.</li>")
-    o.append(f"<li><strong>Fix the missing location data.</strong> In recent "
-             f"weeks a growing share of trips did not report where they ended, "
-             f"which limits what we can measure. Worth raising with the "
-             f"vehicle team.</li>")
+    o.append(f"<li><strong>The stations cover {catered:.0f}% of the "
+             f"fleet&rsquo;s energy.</strong> The remaining "
+             f"{swaps_share:.0f}% is still handled by swapping batteries by "
+             f"hand, which works out at about "
+             f"{per_day_need - per_day_sup:,.0f} kWh a day.</li>")
+    o.append(f"<li><strong>Coverage drops when the city is busiest.</strong> "
+             f"The stations give out about the same energy every week "
+             f"regardless of demand, so their share fell to {busy_cat:.0f}% in "
+             f"the busiest week against a third or more in quiet weeks.</li>")
+    o.append(f"<li><strong>{dock_rate:.0f} trips in 100 end at a station.</strong> "
+             f"The other {100 - dock_rate:.0f} finish somewhere else in the "
+             f"city.</li>")
+    o.append(f"<li><strong>{veh_share:.0f}% of scooters reach a station in a "
+             f"given week.</strong> So the network is within range of most of "
+             f"the fleet, even though few trips finish there.</li>")
+    o.append(f"<li><strong>Use is concentrated in a few locations.</strong> "
+             f"{live_sites} of {len(sites)} sites get real traffic, and the "
+             f"busiest three take a large share of it. Some of the quiet ones "
+             f"were only installed recently.</li>")
+    o.append(f"<li><strong>Location data has become less complete.</strong> In "
+             f"the last few weeks more trips did not report where they ended, "
+             f"so the recent docking figures are less certain than the earlier "
+             f"ones.</li>")
     o.append("</ul>")
     o.append("</div>")
 
     o.append(f'<div class="foot">Vaasa station pilot &middot; '
-             f'{start.strftime("%-d %b")}&ndash;{end.strftime("%-d %b %Y")} &middot; '
+             f'{start.strftime("%-d %b")} to {end.strftime("%-d %b %Y")} &middot; '
              f'prepared {_dt.date.today().strftime("%-d %B %Y")}</div>')
     o.append("</div></body></html>")
 
