@@ -146,6 +146,75 @@ def line_chart(labels: list[str], series: list[dict], *, y_suffix: str = "",
     return "".join(p)
 
 
+def funnel_chart(steps: list[dict]) -> str:
+    """Stacked stages, each bar sized as a share of the stage above it.
+
+    Sizing every bar against the first stage would make the last two invisible
+    (160 out of 105,100 is 0.15% of the width), which hides exactly the drop the
+    chart exists to show. Each bar is therefore drawn as its share of the stage
+    directly above, and both the count and that share are printed on the row so
+    nothing has to be inferred from the length alone.
+
+    ``steps`` are dicts with ``label``, ``value`` and ``note``.
+    """
+    W = 900
+    row_h, gap, label_w = 62, 14, 300
+    bar_w = W - label_w - 20
+    H = len(steps) * (row_h + gap) + 10
+    p = [f'<svg viewBox="0 0 {W} {H}" role="img" style="width:100%;height:auto">']
+    for i, s in enumerate(steps):
+        y = i * (row_h + gap)
+        prev = steps[i - 1]["value"] if i else s["value"]
+        share = (s["value"] / prev * 100.0) if prev else 0.0
+        w = max(bar_w * share / 100.0, 3.0)
+        colour = s.get("color", BLUE)
+        p.append(f'<text x="0" y="{y + 24:.0f}" font-size="15" font-weight="700" '
+                 f'fill="{INK}">{esc(s["label"])}</text>')
+        p.append(f'<text x="0" y="{y + 44:.0f}" font-size="13" fill="{MUTED}">'
+                 f'{esc(s["note"])}</text>')
+        p.append(f'<rect x="{label_w}" y="{y + 6:.0f}" width="{bar_w}" '
+                 f'height="{row_h - 12}" fill="{GRID}" rx="6"/>')
+        p.append(f'<rect x="{label_w}" y="{y + 6:.0f}" width="{w:.1f}" '
+                 f'height="{row_h - 12}" fill="{colour}" rx="6"/>')
+        inside = w > 150
+        tx = label_w + w - 12 if inside else label_w + w + 12
+        p.append(f'<text x="{tx:.1f}" y="{y + row_h / 2 + 2:.0f}" font-size="16" '
+                 f'font-weight="800" text-anchor="{"end" if inside else "start"}" '
+                 f'fill="{"#ffffff" if inside else INK}" '
+                 f'style="font-variant-numeric:tabular-nums">'
+                 f'{s["value"]:,.0f}</text>')
+        if i:
+            p.append(f'<text x="{W}" y="{y + row_h / 2 + 2:.0f}" font-size="14" '
+                     f'text-anchor="end" fill="{INK2}" '
+                     f'style="font-variant-numeric:tabular-nums">'
+                     f'{share:.1f}% of the step above</text>')
+    p.append("</svg>")
+    return "".join(p)
+
+
+def compare_bars(items: list[dict], *, y_suffix: str = "%") -> str:
+    """Two or three labelled bars for an at-a-glance headline comparison."""
+    W, H = 900, 150
+    pad, gap = 0, 26
+    n = len(items)
+    bw = (W - gap * (n - 1)) / n
+    vmax = max(i["value"] for i in items) * 1.35
+    p = [f'<svg viewBox="0 0 {W} {H}" role="img" style="width:100%;height:auto">']
+    for i, it in enumerate(items):
+        x = i * (bw + gap)
+        h = (H - 58) * it["value"] / vmax
+        y = H - 40 - h
+        p.append(f'<rect x="{x:.0f}" y="{y:.0f}" width="{bw:.0f}" height="{h:.0f}" '
+                 f'fill="{it["color"]}" rx="8"/>')
+        p.append(f'<text x="{x + bw / 2:.0f}" y="{y - 10:.0f}" font-size="30" '
+                 f'font-weight="800" text-anchor="middle" fill="{INK}">'
+                 f'{it["value"]:.0f}{y_suffix}</text>')
+        p.append(f'<text x="{x + bw / 2:.0f}" y="{H - 14:.0f}" font-size="14.5" '
+                 f'text-anchor="middle" fill="{INK2}">{esc(it["label"])}</text>')
+    p.append("</svg>")
+    return "".join(p)
+
+
 def bar_chart(labels: list[str], values: list[float], *, color: str = BLUE,
               y_suffix: str = "", fmt=lambda v: f"{v:,.0f}",
               highlight: int | None = None) -> str:
@@ -572,14 +641,22 @@ def build(out_path: Path) -> Path:
     o.append('<div class="card">')
     o.append("<h2>How much energy do the scooters that use our stations get "
              "from us?</h2>")
-    o.append(f'<p class="lead">The figure above mixes in scooters that never go '
-             f'near a rack. This one does not. For each week we take the '
-             f'scooters that ended at least one trip within '
-             f'{S.DOCK_RADIUS_M:.0f} metres of a station that week, work out how '
-             f'much energy <em>those</em> scooters needed that week, and compare '
-             f'it with how much the stations gave <em>those same</em> scooters. '
-             f'Full weeks only, {cov_weeks_txt}.</p>')
-    o.append('<div class="chartttl">Share of energy covered by the stations, each week</div>')
+    o.append(f'<p class="lead">The 31% above counts the whole fleet, including '
+             f'scooters that never go near a rack. A fairer question is how '
+             f'well we serve the scooters that <em>do</em> use the stations. '
+             f'Each week we take the scooters that ended at least one trip at a '
+             f'station, then compare the energy <em>those</em> scooters needed '
+             f'with what the stations actually gave <em>them</em>.</p>')
+    o.append('<div class="chartttl">Share of their energy that came from our stations</div>')
+    o.append(compare_bars([
+        {"label": "Scooters that visit a station", "value": cov_pct, "color": GREEN},
+        {"label": "The whole fleet", "value": cov_fleet_pct, "color": MUTED},
+    ]))
+    o.append(f'<div class="takeaway">Scooters that use the stations get '
+             f'<strong>{cov_pct:.0f}%</strong> of their energy from us, against '
+             f'<strong>{cov_fleet_pct:.0f}%</strong> across the whole fleet. '
+             f'Better, but still under half.</div>')
+    o.append('<div class="chartttl">The same two figures, week by week</div>')
     o.append('<div class="legend">'
              f'<span><i style="background:{GREEN}"></i>Scooters that visited a '
              f'station that week</span>'
@@ -589,14 +666,12 @@ def build(out_path: Path) -> Path:
                         [{"values": cov_visitor_line, "color": GREEN},
                          {"values": cov_fleet_line, "color": MUTED}],
                         y_suffix="%", y_max=60, fmt=lambda v: f"{v:,.0f}"))
-    o.append(f'<div class="takeaway warn">Across these weeks the scooters that '
-             f'visited a station needed <strong>{cov_need:,.0f} kWh</strong> and '
-             f'the stations gave them <strong>{cov_given:,.0f} kWh</strong>. That '
-             f'is <strong>{cov_pct:.1f}%</strong>, against '
-             f'<strong>{cov_fleet_pct:.1f}%</strong> for the fleet as a whole. '
-             f'Even for the scooters that do reach a station, the stations '
-             f'supply under half their energy. The rest is still battery '
-             f'swaps.</div>')
+    o.append(f'<div class="takeaway warn">Across these weeks those scooters '
+             f'needed <strong>{cov_need:,.0f} kWh</strong> and the stations gave '
+             f'them <strong>{cov_given:,.0f} kWh</strong>. The gap is still '
+             f'covered by swapping batteries. The line drops in the busiest week '
+             f'for the same reason as everything else on this page, the stations '
+             f'give out about the same energy no matter how busy it gets.</div>')
     o.append('<div class="tablewrap">')
     o.append("<table><thead><tr><th>Week</th><th class='num'>Scooters that rode</th>"
              "<th class='num'>Of those, visited a station</th>"
@@ -689,18 +764,30 @@ def build(out_path: Path) -> Path:
                  f'unknown, not as a drop.</div>')
 
     o.append("<h3>What happens after a trip ends at a station</h3>")
-    o.append(f'<p class="note">Ending a trip beside a rack is not the same as '
-             f'putting the scooter on it. Of the <strong>{ft["ends"]:,} '
-             f'trips</strong> that ended within {S.DOCK_RADIUS_M:.0f} metres of '
-             f'a station, <strong>{ft30["docked_or_charged_pct"]:.1f}%</strong> '
-             f'({ft30["docked_or_charged"]:,}) had that same scooter docked or '
-             f'charged at that same station within 30 minutes, and '
-             f'<strong>{ft30["charged_pct"]:.1f}%</strong> ({ft30["charged"]:,}) '
-             f'actually drew power. Widening the wait to a full day raises it to '
-             f'{ft24["docked_or_charged_pct"]:.1f}% docked or charged, of which '
-             f'{ft24["charged_pct"]:.1f}% drew power. So the scooters reach the '
-             f'stations and are parked next to them, but they are rarely put on '
-             f'a point by the person who rode them there.</p>')
+    o.append(f'<p class="note">Leaving a scooter beside a rack is not the same '
+             f'as putting it on the rack. This follows every trip through to '
+             f'what happened next.</p>')
+    o.append(funnel_chart([
+        {"label": "All trips", "value": rides,
+         "note": f"over the {days} days", "color": MUTED},
+        {"label": "Ended at a station",
+         "value": ft["ends"],
+         "note": f"within {S.DOCK_RADIUS_M:.0f} metres of one", "color": BLUE},
+        {"label": "Put on a charging point",
+         "value": ft30["docked_or_charged"],
+         "note": "by anyone, within 30 minutes", "color": ORANGE},
+        {"label": "Actually took charge",
+         "value": ft30["charged"],
+         "note": "drew power, not just docked", "color": GREEN},
+    ]))
+    o.append(f'<div class="takeaway">Scooters do reach the stations and get '
+             f'parked next to them, but they are rarely put on a point by the '
+             f'person who rode them there. Out of every 100 trips that end at a '
+             f'station, about <strong>{ft30["docked_or_charged_pct"]:.0f}</strong> '
+             f'end with the scooter on a point within half an hour. Waiting a '
+             f'full day instead of half an hour raises that to '
+             f'{ft24["docked_or_charged_pct"]:.0f} in 100, which is the staff '
+             f'collecting them later.</div>')
     o.append("</div>")
 
     # ---- stations ---------------------------------------------------------
