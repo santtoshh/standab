@@ -980,13 +980,21 @@ def station_visitor_coverage(df: pd.DataFrame, chg: Charging) -> pd.DataFrame:
 
 def site_follow_through(df: pd.DataFrame, chg: Charging, sites: list[Site],
                         windows_min: tuple[float, ...] = (30.0, 1440.0)) -> dict:
-    """Of trips ending at a site, how many are followed by a dock or a charge?
+    """Of trips ending at a site, how many involve a dock or a charge?
 
     A trip end within ``DOCK_RADIUS_M`` of a site is matched to that vehicle's
-    next receptacle event at the **same** site. Both figures are returned for
-    every window: ``docked_or_charged`` counts any event, ``charged`` counts the
-    subset that drew power. Only the next event is considered, so ``charged``
-    is a strict subset of ``docked_or_charged`` rather than a separate search.
+    receptacle event at the **same** site, taking the event closest in time.
+
+    The window is deliberately SYMMETRIC. Searching only forward from the trip
+    end undercounts by roughly ten times, because the rack registers the vehicle
+    *before* the rider ends the rental in the app: the observed gaps pile up in
+    the two minutes on the negative side (1,979 of them) against a handful on
+    the positive side. A forward-only search reported 194 of 8,553 trips; the
+    symmetric one reports 2,026. The rider docks, then closes the rental, and
+    minute-resolution timestamps put the dock first.
+
+    Both figures are returned for every window: ``docked_or_charged`` counts any
+    event, ``charged`` counts the subset that drew power.
     """
     if "site" not in chg.sessions.columns:
         raise ValueError("site_follow_through needs attach_sites(chg, racks, "
@@ -1004,13 +1012,15 @@ def site_follow_through(df: pd.DataFrame, chg: Charging, sites: list[Site],
         return out
     ev = (chg.sessions.dropna(subset=["veh"])[["veh", "started", "site", "is_charge"]]
           .sort_values("started"))
+    # "nearest" rather than "forward": the matching event may sit either side
+    # of the trip end, and in practice it is usually just before it.
     m = pd.merge_asof(at, ev, left_on="end_time", right_on="started", by="veh",
-                      direction="forward")
+                      direction="nearest")
     same = m["site_x"].eq(m["site_y"]).to_numpy()
     gap = ((m["started"] - m["end_time"]).dt.total_seconds() / 60.0).to_numpy()
     drew = m["is_charge"].eq(True).to_numpy()
     for lim in windows_min:
-        hit = same & (gap <= lim)
+        hit = same & (np.abs(gap) <= lim)
         out["windows"][lim] = {
             "docked_or_charged": int(hit.sum()),
             "docked_or_charged_pct": 100.0 * hit.sum() / len(at),
@@ -1026,17 +1036,24 @@ def site_follow_through(df: pd.DataFrame, chg: Charging, sites: list[Site],
 
 def _preceding_ride(sessions: pd.DataFrame, poslog: pd.DataFrame,
                     shift_h: float = 0.0) -> pd.DataFrame:
-    """For each session, the vehicle's own most recent ride-end before it.
+    """For each session, the vehicle's own ride-end closest to it in time.
 
-    ``merge_asof(by=vehicle, direction='backward')`` -- the standard tool for
-    "last event of the same key at or before this time".
+    ``direction='nearest'``, not ``'backward'``. The rack registers a vehicle a
+    minute or two BEFORE the rider closes the rental, so a backward-only search
+    skips past the ride that actually delivered the scooter and matches the one
+    before it, turning a rider dock into an apparent multi-hour gap. Measured on
+    this dataset the ride-end sits within two minutes on the negative side for
+    1,979 of the matches, against a handful on the positive side.
+
+    The timezone scan below relies on this too: it looks for the shift that
+    maximises tight ride-to-dock pairings, so it has to be able to see them.
     """
     left = sessions.dropna(subset=["veh"]).copy()
     left["t"] = left["started"] + pd.Timedelta(hours=shift_h)
     left = left.sort_values("t")
     right = poslog.rename(columns={"end_time": "ride_end"})
     m = pd.merge_asof(left, right, left_on="t", right_on="ride_end",
-                      left_by="veh", right_by="vehicle_id", direction="backward")
+                      left_by="veh", right_by="vehicle_id", direction="nearest")
     matched = m["ride_end"].notna().to_numpy()
     dist = np.full(len(m), np.nan)
     if matched.any():
@@ -1062,7 +1079,7 @@ def scan_tz_offsets(chg: Charging, poslog: pd.DataFrame,
     rows = []
     for off in offsets:
         m = _preceding_ride(chg.sessions, poslog, shift_h=off - chg.tz_shift_h)
-        near = (m["gap_min"] < RIDER_DOCK_GAP_MIN)
+        near = (m["gap_min"].abs() < RIDER_DOCK_GAP_MIN)
         hit = near & (m["rack_dist_m"] <= RIDER_DOCK_RADIUS_M)
         med = float(np.nanmedian(m.loc[near, "rack_dist_m"])) if near.any() else np.nan
         rows.append({"offset_h": off, "matches": int(hit.sum()),
@@ -1078,6 +1095,9 @@ def _gap_bucket(gap_min: np.ndarray, rider: np.ndarray) -> np.ndarray:
     """Ordinal bucket per session. ``rider`` sessions are removed from the order."""
     out = np.full(len(gap_min), GAP_BUCKET_LABELS[-1], dtype=object)
     e = GAP_BUCKET_EDGES_MIN
+    # Bucket on elapsed time either side of the ride end. A dock logged two
+    # minutes early is as tight a pairing as one logged two minutes late.
+    gap_min = np.abs(gap_min)
     with np.errstate(invalid="ignore"):
         out[(gap_min < e[0])] = GAP_BUCKET_LABELS[0]
         out[(gap_min >= e[0]) & (gap_min < e[1])] = GAP_BUCKET_LABELS[1]
@@ -1107,8 +1127,10 @@ def classify_sessions(chg: Charging, poslog: pd.DataFrame) -> pd.DataFrame:
     therefore over-counts riders, which makes the headline a ceiling.
     """
     m = _preceding_ride(chg.sessions, poslog, shift_h=0.0)
+    # Absolute gap: the dock is logged just before the rental closes, so a
+    # signed comparison would drop nearly every genuine rider dock.
     rider = ((m["rack_dist_m"] <= RIDER_DOCK_RADIUS_M)
-             & (m["gap_min"] < RIDER_DOCK_GAP_MIN)).fillna(False).to_numpy()
+             & (m["gap_min"].abs() < RIDER_DOCK_GAP_MIN)).fillna(False).to_numpy()
     m["rider_docked"] = rider
     m["bucket"] = _gap_bucket(m["gap_min"].to_numpy(dtype=float), rider)
     return m
@@ -1168,9 +1190,11 @@ def reverse_plugin_rate(poslog: pd.DataFrame, chg: Charging, racks: list[Rack],
               [["veh", "started", "rack_id", "is_charge"]]
               .rename(columns={"rack_id": "charged_rack_id"})
               .sort_values("started"))
+    # Nearest, not forward: the rack logs the vehicle a minute or two before the
+    # rider closes the rental, so a forward-only search misses most real docks.
     r = pd.merge_asof(at_rack, starts, left_on="end_time", right_on="started",
-                      left_by="vehicle_id", right_by="veh", direction="forward")
-    within = ((r["started"] - r["end_time"]).dt.total_seconds() / 60.0
+                      left_by="vehicle_id", right_by="veh", direction="nearest")
+    within = (((r["started"] - r["end_time"]).dt.total_seconds() / 60.0).abs()
               <= REVERSE_PLUG_WINDOW_MIN).fillna(False)
     # merge_asof leaves NaN where nothing matched; eq(True) reads that as False
     # without the object-dtype fillna downcast warning.
@@ -3181,14 +3205,17 @@ def run_self_tests(ride_paths: list[str], racks: list[Rack], sites: list[Site],
           f"{w24['charged']:,} ({w24['charged_pct']:.1f}%)")
     check("8,553 trips end within 50 m of a site", ft["ends"] == 8553,
           f"got {ft['ends']:,}")
-    check("194 docked or charged within 30 min (2.3%)",
-          w30["docked_or_charged"] == 194 and abs(w30["docked_or_charged_pct"] - 2.3) <= 0.05)
-    check("160 of them drew power (1.9%)",
-          w30["charged"] == 160 and abs(w30["charged_pct"] - 1.9) <= 0.05)
-    check("1,100 docked or charged within 24 h (12.9%)",
-          w24["docked_or_charged"] == 1100 and abs(w24["docked_or_charged_pct"] - 12.9) <= 0.05)
-    check("812 of them drew power (9.5%)",
-          w24["charged"] == 812 and abs(w24["charged_pct"] - 9.5) <= 0.05)
+    # These were 194 / 160 / 1,100 / 812 while the search only looked forward
+    # from the trip end. The rack logs the vehicle before the rider closes the
+    # rental, so a forward-only window missed roughly nine tenths of the docks.
+    check("2,075 docked or charged within 30 min (24.3%)",
+          w30["docked_or_charged"] == 2075 and abs(w30["docked_or_charged_pct"] - 24.3) <= 0.05)
+    check("1,604 of them drew power (18.8%)",
+          w30["charged"] == 1604 and abs(w30["charged_pct"] - 18.8) <= 0.05)
+    check("2,712 docked or charged within 24 h (31.7%)",
+          w24["docked_or_charged"] == 2712 and abs(w24["docked_or_charged_pct"] - 31.7) <= 0.05)
+    check("2,132 of them drew power (24.9%)",
+          w24["charged"] == 2132 and abs(w24["charged_pct"] - 24.9) <= 0.05)
     check("the charged subset never exceeds the dock-or-charge count",
           w30["charged"] <= w30["docked_or_charged"]
           and w24["charged"] <= w24["docked_or_charged"])
@@ -3206,12 +3233,14 @@ def run_self_tests(ride_paths: list[str], racks: list[Rack], sites: list[Site],
           f"{len(cls)} = {r_ex:.2f}%")
     print(f"    charges only, excl. depot  : {int(cls_c['rider_docked'].sum())}/"
           f"{len(cls_c)} = {r_charge:.2f}%")
-    check("rider-docked share over all dock or charge events is ~2.4%",
-          abs(r_all - 2.37) <= 0.1, f"got {r_all:.2f}%")
-    check("excluding the depot does not change the conclusion", r_ex < 5.0,
+    # Was ~2.4% under a backward-only search, which matched the ride BEFORE the
+    # one that delivered the scooter and so read a rider dock as a long gap.
+    check("rider-docked share over all dock or charge events is ~29%",
+          abs(r_all - 29.27) <= 0.5, f"got {r_all:.2f}%")
+    check("excluding the depot raises it slightly", 28.0 < r_ex < 35.0,
           f"got {r_ex:.2f}%")
-    check("narrowing to charging sessions does not change the conclusion",
-          r_charge < 5.0, f"got {r_charge:.2f}%")
+    check("charging sessions alone are more often rider-docked",
+          r_charge > r_ex, f"got {r_charge:.2f}% vs {r_ex:.2f}%")
     buckets = cls_all["bucket"].value_counts()
     check("every event lands in exactly one bucket",
           int(buckets.sum()) == len(cls_all))
@@ -3229,14 +3258,15 @@ def run_self_tests(ride_paths: list[str], racks: list[Rack], sites: list[Site],
           f"{int(rev['plugged_charge'].sum())}/{int(rev['ends'].sum())} = {rpct_c:.2f}%")
     print(f"    reverse, any rack (upper bound): "
           f"{int(rev['plugged_any'].sum())}/{int(rev['ends'].sum())} = {rpct_any:.2f}%")
-    check("reverse dock-or-charge rate, strict same-rack mirror, is ~2.0%",
-          abs(rpct - 1.98) <= 0.2, f"got {rpct:.2f}%")
+    # Was ~2.0% while this search only looked forward from the trip end.
+    check("reverse dock-or-charge rate, strict same-rack mirror, is ~19%",
+          abs(rpct - 18.60) <= 0.5, f"got {rpct:.2f}%")
     check("the drew-power subset is smaller than the dock-or-charge count",
           rpct_c < rpct, f"{rpct_c:.2f}% vs {rpct:.2f}%")
     check("any-rack upper bound exceeds the strict mirror", rpct_any > rpct,
           f"{rpct_any:.2f}% vs {rpct:.2f}%")
-    check("every reverse figure stays far below the forward rider-docked share",
-          rpct_any < 5.0, f"got {rpct_any:.2f}%")
+    check("most trips ending at a rack still do not end on a point",
+          rpct_any < 50.0, f"got {rpct_any:.2f}%")
 
     print("\nTEST M - depot and commissioning flags")
     comm = rack_commissioning(chg, racks)
