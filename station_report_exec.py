@@ -896,15 +896,16 @@ def build(out_path: Path) -> Path:
     o.append(f"<li><strong>{dock_rate:.0f} trips in 100 end at a station.</strong> "
              f"The other {100 - dock_rate:.0f} finish somewhere else in the "
              f"city.</li>")
-    o.append(f"<li><strong>Ending at a station rarely means being put on "
-             f"one.</strong> Of the {ft['ends']:,} trips that end within "
+    o.append(f"<li><strong>About one in four of those goes on a charging "
+             f"point.</strong> Of the {ft['ends']:,} trips that end within "
              f"{S.DOCK_RADIUS_M:.0f} metres of a station, "
              f"{ft30['docked_or_charged_pct']:.1f}% see that scooter docked or "
              f"charged at that same station within 30 minutes, and "
-             f"{ft30['charged_pct']:.1f}% draw power.</li>")
+             f"{ft30['charged_pct']:.1f}% draw power. The rest are left beside "
+             f"the rack.</li>")
     o.append(f"<li><strong>{veh_share:.0f}% of scooters reach a station in a "
              f"given week.</strong> So the network is within range of most of "
-             f"the fleet, even though few trips finish there.</li>")
+             f"the fleet, even though most trips finish elsewhere.</li>")
     o.append(f"<li><strong>Even the scooters that use a station get "
              f"{cov_pct:.0f}% of their energy from us.</strong> Over the six "
              f"full weeks those scooters needed {cov_need:,.0f} kWh and the "
