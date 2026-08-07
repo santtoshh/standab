@@ -146,7 +146,7 @@ def line_chart(labels: list[str], series: list[dict], *, y_suffix: str = "",
     return "".join(p)
 
 
-def funnel_chart(steps: list[dict], *, share_label: str = "of the total above") -> str:
+def funnel_chart(steps: list[dict], *, share_label: str = "of the first row") -> str:
     """Stages on ONE shared scale, every bar measured against the first.
 
     Scaling each bar to the stage directly above it was tried and thrown out:
@@ -187,6 +187,9 @@ def funnel_chart(steps: list[dict], *, share_label: str = "of the total above") 
                  f'style="font-variant-numeric:tabular-nums">'
                  f'{s["value"]:,.0f}</text>')
         if i:
+            # Share is against the FIRST row, not the row above, so the label
+            # must name the first row. "of the trips above" read as "of the row
+            # directly above" and did not match the arithmetic.
             p.append(f'<text x="{W}" y="{y + row_h / 2 + 2:.0f}" font-size="13.5" '
                      f'text-anchor="end" fill="{MUTED}" '
                      f'style="font-variant-numeric:tabular-nums">'
@@ -450,6 +453,17 @@ def build(out_path: Path) -> Path:
     ft = S.site_follow_through(df, chg, sites)
     ft30, ft24 = ft["windows"][30.0], ft["windows"][1440.0]
 
+    # The technical report answers the same question on a different population:
+    # individual racks rather than merged locations, and the raw position log,
+    # which keeps the sub-100 m hops this report excludes. Quoting it here stops
+    # the two documents appearing to disagree.
+    _poslog = S.position_log(raw)
+    _rev = S.reverse_plugin_rate(
+        _poslog, chg, [r for r in racks if r.rack_id not in S.DEPOT_RACK_IDS],
+        since=chg.sessions["started"].min().normalize())
+    _rev_pct = (100.0 * _rev["plugged"].sum() / _rev["ends"].sum()
+                if not _rev.empty else float("nan"))
+
     # Same measure at the wider radius, computed here so both live side by side.
     _dw = pd.DataFrame({
         "week": df["week"].values,
@@ -513,7 +527,9 @@ def build(out_path: Path) -> Path:
     # document, and anyone cross-referencing the two would land on the wrong
     # station.
     site_lbl = [str(v) for v in pst["site"]]
-    live_sites = int((pst["buffer_ends"] > 10).sum())
+    # Counted on the same figures the chart plots. Using the wider buffer count
+    # here put "11 of 12" above a chart showing two flat bars.
+    live_sites = int((pst["ends"] > 10).sum())
 
     # Rack-level detail behind each location, so the grouping is auditable:
     # which physical racks were merged, how many charging points they add up
@@ -548,6 +564,28 @@ def build(out_path: Path) -> Path:
         })
     merged_sites = sum(1 for r in site_rows if r["n_racks"] > 1)
 
+    # The two near-flat bars in the per-location chart need explaining on the
+    # page, and the explanation has to be derived: "installed recently" was
+    # written there once and is false, both racks logged their first event on
+    # the first day of operation.
+    _quiet = sorted(site_rows, key=lambda r: r["near"])[:2]
+    _depot_row = next((r for r in _quiet
+                       if any(rk.rack_id in S.DEPOT_RACK_IDS
+                              for rk in [racks[i] for i in by_name[r["label"]].rack_indices])),
+                      _quiet[0])
+    _near_row = next(r for r in _quiet if r is not _depot_row)
+    _depot_lbl, _depot_kwh = _depot_row["label"], _depot_row["kwh"]
+    _near_lbl = _near_row["label"]
+    _ns = by_name[_near_lbl]
+    _others = [s for s in sites if s.name != _near_lbl]
+    _dists = [(S.haversine_m(_ns.lat, _ns.lon, s.lat, s.lon), s.name) for s in _others]
+    _near_gap, _near_to = min(_dists)
+
+    # Share of the fleet that reached a station at any point in the window,
+    # which is the claim the weekly figure was being stretched to support.
+    _ever = df.loc[df["docked"], "vehicle_id"].astype(str).nunique()
+    _ever_pct = 100.0 * _ever / df["vehicle_id"].astype(str).nunique()
+
     swaps_share = 100.0 - catered
     per_day_need = need_total / days
     per_day_sup = supplied / days
@@ -579,8 +617,8 @@ def build(out_path: Path) -> Path:
              f'{WIDE_RADIUS_M:.0f} metres</div></div>')
     o.append(f'<div class="hero"><div class="n">{veh_share:.0f}%</div>'
              f'<div class="t">of scooters visit a station in a given week</div>'
-             f'<div class="s">so most of the fleet does reach a station at '
-             f'some point</div></div>')
+             f'<div class="s">counted against the scooters that rode that '
+             f'week</div></div>')
     o.append(f'<div class="hero"><div class="n">{cov_pct:.0f}%</div>'
              f'<div class="t">of the energy needed by the scooters that do use '
              f'our stations comes from the stations</div>'
@@ -672,9 +710,9 @@ def build(out_path: Path) -> Path:
     o.append(f'<div class="takeaway warn">Across these weeks those scooters '
              f'needed <strong>{cov_need:,.0f} kWh</strong> and the stations gave '
              f'them <strong>{cov_given:,.0f} kWh</strong>. The gap is still '
-             f'covered by swapping batteries. The line drops in the busiest week '
-             f'for the same reason as everything else on this page, the stations '
-             f'give out about the same energy no matter how busy it gets.</div>')
+             f'covered by swapping batteries. The line drops in the busiest '
+             f'week because demand rose while the energy the stations delivered '
+             f'stayed flat.</div>')
     o.append('<div class="tablewrap">')
     o.append("<table><thead><tr><th>Week</th><th class='num'>Scooters that rode</th>"
              "<th class='num'>Of those, visited a station</th>"
@@ -729,10 +767,13 @@ def build(out_path: Path) -> Path:
              f'In the busiest week ({busy_wk}) each scooter did '
              f'<strong>{busy_util:.1f} trips a day</strong>, and the stations '
              f'covered only <strong>{busy_cat:.0f}%</strong> of the energy '
-             f'needed. In quieter weeks they cover a third or more. The '
-             f'stations give out about the same energy every week, so '
-             f'<strong>coverage drops exactly when the city needs it '
-             f'most</strong>.</div>')
+             f'needed, its lowest week. Across the other weeks coverage runs '
+             f'between {min(c for c in cat_w if c != busy_cat):.0f}% and '
+             f'{max(cat_w):.0f}%. The stations delivered a similar amount of '
+             f'energy every week while demand moved, so <strong>the share they '
+             f'covered fell when the city got busier</strong>. Note this rests '
+             f'mostly on the one busy week: without it the relationship across '
+             f'the remaining weeks is weak.</div>')
     o.append("</div>")
 
     # ---- docking ----------------------------------------------------------
@@ -782,12 +823,17 @@ def build(out_path: Path) -> Path:
         {"label": "Took charge",
          "value": ft30["charged"],
          "note": "drew power, not just docked", "color": GREEN},
-    ], share_label="of the trips above"))
+    ], share_label=f"of the {ft['ends']:,} above"))
     o.append(f'<div class="takeaway">About <strong>1 in 4</strong> trips that '
              f'end at a station finish with the scooter on a charging point, '
              f'and about <strong>1 in 5</strong> with it actually taking charge. '
              f'The remaining three quarters are left beside the rack rather '
-             f'than on it.</div>')
+             f'than on it. A scooter counts as put on a point when the rack '
+             f'logs it within half an hour of the trip ending, so this is '
+             f'matched by time and place rather than read from a docking '
+             f'record on the trip itself. The technical report runs the same '
+             f'measure against individual racks and a wider set of short trips '
+             f'and gets {_rev_pct:.0f}%.</div>')
 
     # The station-side view of the same events lived here and was cut: it
     # largely restated the funnel, and its total (8,363 dock events) sits so
@@ -811,9 +857,14 @@ def build(out_path: Path) -> Path:
                        [r["near"] for r in site_rows],
                        color=BLUE, fmt=lambda v: f"{v:,.0f}"))
     o.append(f'<div class="takeaway"><strong>{live_sites} of {len(sites)}</strong> '
-             f'locations get real traffic, and the busiest three take a large '
-             f'share of it. Some of the quiet ones were only installed '
-             f'recently.</div>')
+             f'locations take real traffic here, and the busiest three take a '
+             f'large share of it. The two flat bars are not idle hardware. '
+             f'{_near_lbl} stands {_near_gap:.0f} metres from {_near_to}, and '
+             f'because every trip counts only against its closest location, '
+             f'the neighbour takes most of the trips that end near it. '
+             f'{_depot_lbl} is the yard rack: vehicles are delivered there by '
+             f'van rather than ridden there, which is why it shows almost no '
+             f'trips but {_depot_kwh:.0f} kWh of charging.</div>')
 
     o.append("<h3>How the racks group into locations</h3>")
     o.append(f'<p class="note">We have {len(racks)} racks in the city, but some '
@@ -870,12 +921,14 @@ def build(out_path: Path) -> Path:
              f"hand, which works out at about "
              f"{per_day_need - per_day_sup:,.0f} kWh a day.</li>")
     o.append(f"<li><strong>Coverage drops when the city is busiest.</strong> "
-             f"The stations give out about the same energy every week "
-             f"regardless of demand, so their share fell to {busy_cat:.0f}% in "
-             f"the busiest week against a third or more in quiet weeks.</li>")
-    o.append(f"<li><strong>{dock_rate:.0f} trips in 100 end at a station.</strong> "
-             f"The other {100 - dock_rate:.0f} finish somewhere else in the "
-             f"city.</li>")
+             f"The stations delivered a similar amount of energy every week "
+             f"while demand moved, so their share fell to {busy_cat:.0f}% in "
+             f"the busiest week against "
+             f"{min(c for c in cat_w if c != busy_cat):.0f}% to "
+             f"{max(cat_w):.0f}% in the others.</li>")
+    o.append(f"<li><strong>{dock_rate:.1f} trips in 100 end at a station.</strong> "
+             f"Measured over the six full weeks, on the trips that reported "
+             f"where they ended. The rest finish elsewhere in the city.</li>")
     o.append(f"<li><strong>About one in four of those goes on a charging "
              f"point.</strong> Of the {ft['ends']:,} trips that end within "
              f"{S.DOCK_RADIUS_M:.0f} metres of a station, "
@@ -883,9 +936,10 @@ def build(out_path: Path) -> Path:
              f"charged at that same station within 30 minutes, and "
              f"{ft30['charged_pct']:.1f}% draw power. The rest are left beside "
              f"the rack.</li>")
-    o.append(f"<li><strong>{veh_share:.0f}% of scooters reach a station in a "
-             f"given week.</strong> So the network is within range of most of "
-             f"the fleet, even though most trips finish elsewhere.</li>")
+    o.append(f"<li><strong>{veh_share:.0f}% of the scooters that rode in a "
+             f"given week reached a station that week.</strong> Over the whole "
+             f"period {_ever_pct:.0f}% of the fleet reached one at least "
+             f"once.</li>")
     o.append(f"<li><strong>Even the scooters that use a station get "
              f"{cov_pct:.0f}% of their energy from us.</strong> Over the six "
              f"full weeks those scooters needed {cov_need:,.0f} kWh and the "
@@ -893,10 +947,9 @@ def build(out_path: Path) -> Path:
              f"{cov_fleet_pct:.0f}% for the whole fleet.</li>")
     _top3_kwh = sum(r["kwh"] for r in sorted(site_rows, key=lambda r: -r["kwh"])[:3])
     o.append(f"<li><strong>Use is concentrated in a few locations.</strong> "
-             f"{live_sites} of {len(sites)} sites get real traffic, the busiest "
-             f"three take a large share of the trips, and the three largest "
-             f"deliver {100.0 * _top3_kwh / supplied:.0f}% of all the energy. "
-             f"Some of the quiet ones were only installed recently.</li>")
+             f"{live_sites} of {len(sites)} sites take real traffic. The three "
+             f"that deliver the most energy account for "
+             f"{100.0 * _top3_kwh / supplied:.0f}% of it between them.</li>")
     o.append("</ul>")
     o.append("</div>")
 

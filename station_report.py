@@ -2520,10 +2520,9 @@ def build_report(df: pd.DataFrame, poslog: pd.DataFrame, sites: list[Site],
                f'{fmt_1(wd.loc[peak_wk, "hi_pct"])}%] for the peak week and '
                f'[{fmt_1(wd.loc[trough_wk, "lo_pct"])}%, '
                f'{fmt_1(wd.loc[trough_wk, "hi_pct"])}%] for the trough. '
-               f'{"Those brackets overlap, so the two weeks cannot be ordered at all" if overlap else "Those brackets are disjoint"} '
+               f'{"Those brackets overlap, so the two weeks cannot be ordered at all" if overlap else "Those brackets are disjoint"}'
                f'. The movement is indistinguishable from a GPS-logging '
-               f'regression that began in mid-July. Investigate the logging '
-               f'pipeline before treating this as rider behaviour.</p>')
+               f'regression that began in mid-July.</p>')
     out.append("</div>")
 
     out.append('<div class="tablewrap"><table><thead><tr><th>Week starting</th>'
@@ -2562,7 +2561,7 @@ def build_report(df: pd.DataFrame, poslog: pd.DataFrame, sites: list[Site],
     for _, r in st.iterrows():
         flagged = bool(r["flagged"])
         if flagged:
-            status = "no meaningful rider traffic - investigate"
+            status = "no meaningful rider traffic"
         elif r["buffer_ends"] >= 3 * max(1, r["ends"]):
             status = ("in use - most of its traffic is attributed to a closer "
                       "neighbouring site")
