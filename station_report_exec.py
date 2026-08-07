@@ -467,10 +467,6 @@ def build(out_path: Path) -> Path:
              f"{live_sites} of {len(sites)} sites get real traffic, and the "
              f"busiest three take a large share of it. Some of the quiet ones "
              f"were only installed recently.</li>")
-    o.append(f"<li><strong>Location data has become less complete.</strong> In "
-             f"the last few weeks more trips did not report where they ended, "
-             f"so the recent docking figures are less certain than the earlier "
-             f"ones.</li>")
     o.append("</ul>")
     o.append("</div>")
 
