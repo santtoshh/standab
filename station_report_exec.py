@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as _dt
+import math
 from pathlib import Path
 
 import numpy as np
@@ -41,6 +42,24 @@ MUTED = "#8a8a83"
 GRID = "#e8e8e4"
 SURFACE = "#fcfcfb"
 BAND = "#f0efea"
+
+# The per-station pie needs seven fills and the palette above has three. The
+# extra three are 22% white tints of the same three hues rather than new hues,
+# so the chart stays inside the validated palette. Slot order is fixed and
+# interleaves base with tint so no base sits next to its own tint:
+#   node scripts/validate_palette.js
+#     "#1baf7a,#2a78d6,#ef8961,#5996df,#eb6834,#4dc197,#5b5b57" --mode light
+#   -> lightness PASS, chroma FAIL on the neutral Other slot only (it is meant
+#      to read as grey), CVD separation PASS (worst adjacent 9.6 deutan),
+#      normal-vision PASS (24.0), contrast WARN -> relieved by the direct slice
+#      labels, the value legend and the per-station table beneath it.
+BLUE_TINT = "#5996df"
+ORANGE_TINT = "#ef8961"
+GREEN_TINT = "#4dc197"
+PIE_COLORS = [GREEN, BLUE, ORANGE_TINT, BLUE_TINT, ORANGE, GREEN_TINT]
+PIE_OTHER = INK2          # the residual bucket is deliberately neutral
+PIE_TOP_N = 6             # twelve slices is unreadable; the rest fold into Other
+PIE_LABEL_MIN_PCT = 8.0   # slices at or above this are labelled on the chart
 
 W, H = 900, 300          # chart viewBox; scales to container width
 PAD_L, PAD_R, PAD_T, PAD_B = 62, 26, 30, 46
@@ -163,6 +182,117 @@ def bar_chart(labels: list[str], values: list[float], *, color: str = BLUE,
     return "".join(p)
 
 
+def pie_slices(items: list[dict], top_n: int = PIE_TOP_N) -> list[dict]:
+    """Largest ``top_n`` entries, then one Other slice holding the remainder.
+
+    ``items`` are dicts with ``label`` and ``value``. The returned list always
+    sums to the input total, so the chart and the table below it cannot
+    disagree: Other is computed as total minus the slices above it rather than
+    re-summed from the tail.
+    """
+    ranked = sorted(items, key=lambda r: -r["value"])
+    total = sum(r["value"] for r in items)
+    head, tail = ranked[:top_n], ranked[top_n:]
+    out = [{"label": r["label"], "value": r["value"],
+            "pct": 100.0 * r["value"] / total if total else 0.0,
+            "color": PIE_COLORS[i % len(PIE_COLORS)], "n_merged": 1}
+           for i, r in enumerate(head)]
+    if tail:
+        rest = total - sum(r["value"] for r in head)
+        out.append({"label": f"Other ({len(tail)} locations)", "value": rest,
+                    "pct": 100.0 * rest / total if total else 0.0,
+                    "color": PIE_OTHER, "n_merged": len(tail)})
+    return out
+
+
+def pie_chart(slices: list[dict], *, unit: str = "kWh",
+              fmt=lambda v: f"{v:,.0f}", legend_title: str = "ENERGY GIVEN",
+              total_label: str = "Total", wrap_at: int = 30) -> str:
+    """Pie with outside labels and a value legend, largest slice first.
+
+    Labels sit outside the arc on a short leader line rather than on the fill,
+    so every number is drawn in text ink on the page surface instead of over a
+    coloured wedge. Only slices at or above ``PIE_LABEL_MIN_PCT`` get one; the
+    thin ones would collide, and the legend carries their values anyway. Each
+    slice takes a 2px surface-coloured stroke so neighbours never touch.
+    """
+    WW, HH = 900, 360
+    cx, cy, r = 208.0, 180.0, 124.0
+    p = [f'<svg viewBox="0 0 {WW} {HH}" role="img" style="width:100%;height:auto">']
+    ang = -math.pi / 2                      # start at 12 o'clock, run clockwise
+    total = sum(s["value"] for s in slices) or 1.0
+    for s in slices:
+        sweep = 2 * math.pi * s["value"] / total
+        a0, a1 = ang, ang + sweep
+        ang = a1
+        if sweep <= 0:
+            continue
+        if sweep >= 2 * math.pi - 1e-9:     # a lone slice is a whole circle
+            p.append(f'<circle cx="{cx}" cy="{cy}" r="{r}" fill="{s["color"]}" '
+                     f'stroke="{SURFACE}" stroke-width="2"/>')
+        else:
+            x0, y0 = cx + r * math.cos(a0), cy + r * math.sin(a0)
+            x1, y1 = cx + r * math.cos(a1), cy + r * math.sin(a1)
+            large = 1 if sweep > math.pi else 0
+            p.append(f'<path d="M{cx:.1f},{cy:.1f} L{x0:.1f},{y0:.1f} '
+                     f'A{r:.1f},{r:.1f} 0 {large} 1 {x1:.1f},{y1:.1f} Z" '
+                     f'fill="{s["color"]}" stroke="{SURFACE}" stroke-width="2"/>')
+        if s["pct"] >= PIE_LABEL_MIN_PCT:
+            am = (a0 + a1) / 2
+            lx0, ly0 = cx + (r - 6) * math.cos(am), cy + (r - 6) * math.sin(am)
+            lx1, ly1 = cx + (r + 16) * math.cos(am), cy + (r + 16) * math.sin(am)
+            right = math.cos(am) >= 0
+            tx = lx1 + (7 if right else -7)
+            p.append(f'<line x1="{lx0:.1f}" y1="{ly0:.1f}" x2="{lx1:.1f}" '
+                     f'y2="{ly1:.1f}" stroke="{MUTED}" stroke-width="1.5"/>')
+            p.append(f'<text x="{tx:.1f}" y="{ly1 + 5:.1f}" font-size="14" '
+                     f'font-weight="700" fill="{INK}" '
+                     f'text-anchor="{"start" if right else "end"}">'
+                     f'{s["pct"]:.0f}%</text>')
+    # Legend: colour chip, label, value, share. Identity is never colour alone.
+    lx, ly = 470.0, 62.0
+    p.append(f'<text x="{lx}" y="{ly - 22:.1f}" font-size="13" font-weight="700" '
+             f'fill="{MUTED}" letter-spacing="0.6">{esc(legend_title)}, '
+             f'{esc(unit.upper())}</text>')
+    for s in slices:
+        p.append(f'<rect x="{lx}" y="{ly - 11:.1f}" width="13" height="13" rx="3" '
+                 f'fill="{s["color"]}"/>')
+        # Wrap long labels onto a second line instead of letting them run into
+        # the value column.
+        words, lines, cur = str(s["label"]).split(), [], ""
+        for w in words:
+            if len(cur) + len(w) + 1 <= wrap_at:
+                cur = f"{cur} {w}".strip()
+            else:
+                lines.append(cur)
+                cur = w
+        if cur:
+            lines.append(cur)
+        for li, line in enumerate(lines):
+            p.append(f'<text x="{lx + 22:.1f}" y="{ly + li * 17:.1f}" '
+                     f'font-size="14.5" fill="{INK}">{esc(line)}</text>')
+        extra = (len(lines) - 1) * 17.0
+        p.append(f'<text x="{lx + 292:.1f}" y="{ly:.1f}" font-size="14.5" '
+                 f'text-anchor="end" fill="{INK}" '
+                 f'style="font-variant-numeric:tabular-nums">{fmt(s["value"])}</text>')
+        # One decimal here on purpose: the slice labels round to whole
+        # percent, and a legend that also rounded would show "8%" beside a
+        # 7.5% slice that the chart correctly leaves unlabelled.
+        p.append(f'<text x="{lx + 372:.1f}" y="{ly:.1f}" font-size="14.5" '
+                 f'text-anchor="end" fill="{INK2}" '
+                 f'style="font-variant-numeric:tabular-nums">{s["pct"]:.1f}%</text>')
+        ly += 30.0 + extra
+    p.append(f'<line x1="{lx}" y1="{ly - 20:.1f}" x2="{lx + 372:.1f}" '
+             f'y2="{ly - 20:.1f}" stroke="{GRID}" stroke-width="1"/>')
+    p.append(f'<text x="{lx + 22:.1f}" y="{ly + 2:.1f}" font-size="14.5" '
+             f'font-weight="700" fill="{INK}">{esc(total_label)}</text>')
+    p.append(f'<text x="{lx + 292:.1f}" y="{ly + 2:.1f}" font-size="14.5" '
+             f'text-anchor="end" font-weight="700" fill="{INK}" '
+             f'style="font-variant-numeric:tabular-nums">{fmt(total)}</text>')
+    p.append("</svg>")
+    return "".join(p)
+
+
 CSS = """
 *{box-sizing:border-box}
 body{margin:0;background:#f4f3ef;color:#111;font:16px/1.6 -apple-system,BlinkMacSystemFont,
@@ -188,7 +318,8 @@ h3{font-size:16px;margin:26px 0 4px;letter-spacing:-.01em}
 .chartttl{font-size:14px;font-weight:700;color:#5b5b57;margin:18px 0 4px;text-transform:uppercase;letter-spacing:.04em}
 .legend{display:flex;gap:20px;flex-wrap:wrap;margin:8px 0 6px;font-size:14.5px;color:#3a3a36}
 .legend i{display:inline-block;width:13px;height:13px;border-radius:3px;margin-right:7px;vertical-align:-1px}
-table{width:100%;border-collapse:collapse;font-size:15px;margin-top:12px}
+.tablewrap{overflow-x:auto;-webkit-overflow-scrolling:touch;margin-top:12px}
+table{width:100%;min-width:560px;border-collapse:collapse;font-size:15px}
 th{text-align:left;font-size:13px;text-transform:uppercase;letter-spacing:.04em;color:#8a8a83;
  padding:8px 10px;border-bottom:2px solid #e6e5df}
 td{padding:9px 10px;border-bottom:1px solid #efeee9}
@@ -208,6 +339,7 @@ def build(out_path: Path) -> Path:
     df, _wf = S.prepare_rides(raw)
     df = S.assign_docking(df, sites)
     chg = S.load_charging(S.DEFAULT_CHARGING_FILE, racks)
+    S.attach_sites(chg, racks, sites)   # needed by the follow-through join
 
     start = df["start_time"].min().normalize()
     end = df["start_time"].max().normalize()
@@ -222,9 +354,29 @@ def build(out_path: Path) -> Path:
     rides = len(df)
     vehicles = int(df["vehicle_id"].nunique())
     need_total = S.energy_need_kwh(rides)
-    supplied = float(chg.sessions["kwh"].sum())
+    # Energy comes from charging sessions only. The export also logs vehicles
+    # that held a point and drew nothing; those are counted where occupancy and
+    # docking are counted, never where kWh are.
+    supplied = float(chg.total_kwh)
     catered = 100.0 * supplied / need_total
     dock_rate = 100.0 * wdf["docked"].sum() / wdf["assessable"].sum()
+
+    # Coverage for the vehicles that actually reach a station, full weeks only.
+    cov = S.station_visitor_coverage(df, chg)
+    cov_need = float(cov["need_kwh"].sum())
+    cov_given = float(cov["given_kwh"].sum())
+    cov_pct = 100.0 * cov_given / cov_need
+    cov_fleet_pct = (100.0 * float(cov["fleet_given_kwh"].sum())
+                     / float(cov["fleet_need_kwh"].sum()))
+    cov_labels = [w.strftime("%-d %b") for w in cov.index]
+    cov_visitor_line = [float(v) for v in cov["coverage_pct"]]
+    cov_fleet_line = [float(v) for v in cov["fleet_coverage_pct"]]
+    cov_weeks_txt = (f'{cov.index[0].strftime("%-d %B")} to '
+                     f'{(cov.index[-1] + pd.Timedelta(days=6)).strftime("%-d %B")}')
+
+    # What happens after a trip ends at a station: same location, next event.
+    ft = S.site_follow_through(df, chg, sites)
+    ft30, ft24 = ft["windows"][30.0], ft["windows"][1440.0]
 
     # Same measure at the wider radius, computed here so both live side by side.
     _dw = pd.DataFrame({
@@ -284,14 +436,17 @@ def build(out_path: Path) -> Path:
                        if u > max(2.0 * base_unass, 2.0)), None)
 
     pst = S.per_site_table(df, sites).sort_values("buffer_ends", ascending=False)
-    site_lbl = [f"S{i + 1}" for i in range(len(pst))]
-    site_val = [int(v) for v in pst["buffer_ends"]]
+    # Reuse the technical report's own site names. Numbering these by traffic
+    # rank instead would make "S8" mean a different physical place in each
+    # document, and anyone cross-referencing the two would land on the wrong
+    # station.
+    site_lbl = [str(v) for v in pst["site"]]
     live_sites = int((pst["buffer_ends"] > 10).sum())
 
     # Rack-level detail behind each location, so the grouping is auditable:
     # which physical racks were merged, how many charging points they add up
     # to, and what each location delivered.
-    kwh_by_rack = chg.sessions.groupby("rack_id")["kwh"].sum()
+    kwh_by_rack = chg.charges.groupby("rack_id")["kwh"].sum()
 
     # Distance from every trip end to each site, then to the nearest one.
     _el, _eo = df["end_lat"].values, df["end_lon"].values
@@ -354,6 +509,12 @@ def build(out_path: Path) -> Path:
              f'<div class="t">of scooters visit a station in a given week</div>'
              f'<div class="s">so most of the fleet does reach a station at '
              f'some point</div></div>')
+    o.append(f'<div class="hero"><div class="n">{cov_pct:.0f}%</div>'
+             f'<div class="t">of the energy needed by the scooters that do use '
+             f'our stations comes from the stations</div>'
+             f'<div class="s">against {cov_fleet_pct:.0f}% across the whole '
+             f'fleet, so reaching a station is not the same as being charged '
+             f'by one</div></div>')
     o.append(f'<div class="hero"><div class="n">{supplied:,.0f} kWh</div>'
              f'<div class="t">charged at the stations so far</div>'
              f'<div class="s">enough energy for about '
@@ -363,10 +524,11 @@ def build(out_path: Path) -> Path:
     # ---- energy -----------------------------------------------------------
     o.append('<div class="card">')
     o.append("<h2>Energy: what the scooters need vs what the stations give</h2>")
-    o.append(f'<p class="lead">Every trip uses about {S.WH_PER_RIDE} Wh of '
-             f'battery. Across {days} days the fleet needed roughly '
-             f'<strong>{need_total:,.0f} kWh</strong>. The stations delivered '
-             f'<strong>{supplied:,.0f} kWh</strong> of it.</p>')
+    o.append(f'<p class="lead">Assuming every trip uses about '
+             f'{S.WH_PER_RIDE} Wh of battery, across {days} days the fleet '
+             f'needed roughly <strong>{need_total:,.0f} kWh</strong>. The '
+             f'stations delivered <strong>{supplied:,.0f} kWh</strong> of '
+             f'it.</p>')
     o.append('<div class="chartttl">Each week, in kilowatt-hours</div>')
     o.append('<div class="legend">'
              f'<span><i style="background:{BLUE}"></i>Energy the scooters needed</span>'
@@ -385,6 +547,85 @@ def build(out_path: Path) -> Path:
              f'every week, between {min(sup_full):,.0f} and '
              f'{max(sup_full):,.0f} kWh. What the fleet needs swings a lot '
              f'more, from {min(need_w):,.0f} to {max(need_w):,.0f} kWh.</div>')
+
+    # ---- where the fleet's energy comes from --------------------------------
+    swaps_kwh = need_total - supplied
+    pie = [
+        {"label": "From our stations", "value": supplied,
+         "pct": 100.0 * supplied / need_total, "color": ORANGE, "n_merged": 1},
+        {"label": "Still done by swapping batteries by hand", "value": swaps_kwh,
+         "pct": 100.0 * swaps_kwh / need_total, "color": MUTED, "n_merged": 1},
+    ]
+    o.append("<h3>Where the fleet&rsquo;s energy comes from</h3>")
+    o.append(f'<p class="note">All {need_total:,.0f} kWh the fleet needed over '
+             f'the {days} days, split by how it was delivered.</p>')
+    o.append(pie_chart(pie, legend_title="ENERGY DELIVERED",
+                       total_label="All energy the fleet needed"))
+    o.append(f'<div class="takeaway">The stations supplied '
+             f'<strong>{supplied:,.0f} kWh</strong> of the '
+             f'{need_total:,.0f} kWh the fleet needed, so '
+             f'<strong>{catered:.0f}%</strong>. The other '
+             f'{swaps_kwh:,.0f} kWh was handled by swapping batteries.</div>')
+    o.append("</div>")
+
+    # ---- coverage for the scooters that actually reach a station ------------
+    o.append('<div class="card">')
+    o.append("<h2>How much energy do the scooters that use our stations get "
+             "from us?</h2>")
+    o.append(f'<p class="lead">The figure above mixes in scooters that never go '
+             f'near a rack. This one does not. For each week we take the '
+             f'scooters that ended at least one trip within '
+             f'{S.DOCK_RADIUS_M:.0f} metres of a station that week, work out how '
+             f'much energy <em>those</em> scooters needed that week, and compare '
+             f'it with how much the stations gave <em>those same</em> scooters. '
+             f'Full weeks only, {cov_weeks_txt}.</p>')
+    o.append('<div class="chartttl">Share of energy covered by the stations, each week</div>')
+    o.append('<div class="legend">'
+             f'<span><i style="background:{GREEN}"></i>Scooters that visited a '
+             f'station that week</span>'
+             f'<span><i style="background:{MUTED}"></i>The whole fleet</span>'
+             "</div>")
+    o.append(line_chart(cov_labels,
+                        [{"values": cov_visitor_line, "color": GREEN},
+                         {"values": cov_fleet_line, "color": MUTED}],
+                        y_suffix="%", y_max=60, fmt=lambda v: f"{v:,.0f}"))
+    o.append(f'<div class="takeaway warn">Across these weeks the scooters that '
+             f'visited a station needed <strong>{cov_need:,.0f} kWh</strong> and '
+             f'the stations gave them <strong>{cov_given:,.0f} kWh</strong>. That '
+             f'is <strong>{cov_pct:.1f}%</strong>, against '
+             f'<strong>{cov_fleet_pct:.1f}%</strong> for the fleet as a whole. '
+             f'Even for the scooters that do reach a station, the stations '
+             f'supply under half their energy. The rest is still battery '
+             f'swaps.</div>')
+    o.append('<div class="tablewrap">')
+    o.append("<table><thead><tr><th>Week</th><th class='num'>Scooters that rode</th>"
+             "<th class='num'>Of those, visited a station</th>"
+             "<th class='num'>Energy they needed</th>"
+             "<th class='num'>Energy the stations gave them</th>"
+             "<th class='num'>Their coverage</th>"
+             "<th class='num'>Whole-fleet coverage</th></tr></thead><tbody>")
+    for w, r in cov.iterrows():
+        o.append(f'<tr><td>{esc(w.strftime("%-d %b"))}</td>'
+                 f'<td class="num">{int(r["riding"]):,}</td>'
+                 f'<td class="num">{int(r["visitors"]):,} '
+                 f'({r["visitor_pct"]:.0f}%)</td>'
+                 f'<td class="num">{r["need_kwh"]:,.0f} kWh</td>'
+                 f'<td class="num">{r["given_kwh"]:,.0f} kWh</td>'
+                 f'<td class="num">{r["coverage_pct"]:.0f}%</td>'
+                 f'<td class="num">{r["fleet_coverage_pct"]:.0f}%</td></tr>')
+    o.append(f'<tr><td><strong>All six weeks</strong></td>'
+             f'<td class="num"></td><td class="num"></td>'
+             f'<td class="num"><strong>{cov_need:,.0f} kWh</strong></td>'
+             f'<td class="num"><strong>{cov_given:,.0f} kWh</strong></td>'
+             f'<td class="num"><strong>{cov_pct:.1f}%</strong></td>'
+             f'<td class="num"><strong>{cov_fleet_pct:.1f}%</strong></td></tr>')
+    o.append("</tbody></table></div>")
+    o.append(f'<p class="note">A scooter counts as a station visitor in a week '
+             f'if any one of its trips ended at a station that week. Energy '
+             f'needed is its trips that week times {S.WH_PER_RIDE} Wh. Energy '
+             f'given counts only sessions that actually delivered power, so a '
+             f'vehicle left on a rack that took no charge adds nothing to this '
+             f'column.</p>')
     o.append("</div>")
 
     # ---- utilisation vs coverage -------------------------------------------
@@ -446,6 +687,20 @@ def build(out_path: Path) -> Path:
                  f'did not report where they were parked. So we cannot say '
                  f'whether docking actually fell. Treat the shaded part as '
                  f'unknown, not as a drop.</div>')
+
+    o.append("<h3>What happens after a trip ends at a station</h3>")
+    o.append(f'<p class="note">Ending a trip beside a rack is not the same as '
+             f'putting the scooter on it. Of the <strong>{ft["ends"]:,} '
+             f'trips</strong> that ended within {S.DOCK_RADIUS_M:.0f} metres of '
+             f'a station, <strong>{ft30["docked_or_charged_pct"]:.1f}%</strong> '
+             f'({ft30["docked_or_charged"]:,}) had that same scooter docked or '
+             f'charged at that same station within 30 minutes, and '
+             f'<strong>{ft30["charged_pct"]:.1f}%</strong> ({ft30["charged"]:,}) '
+             f'actually drew power. Widening the wait to a full day raises it to '
+             f'{ft24["docked_or_charged_pct"]:.1f}% docked or charged, of which '
+             f'{ft24["charged_pct"]:.1f}% drew power. So the scooters reach the '
+             f'stations and are parked next to them, but they are rarely put on '
+             f'a point by the person who rode them there.</p>')
     o.append("</div>")
 
     # ---- stations ---------------------------------------------------------
@@ -453,7 +708,11 @@ def build(out_path: Path) -> Path:
     o.append("<h2>Which stations are being used?</h2>")
     o.append(f'<p class="lead">Trips ending at each of our {len(sites)} station '
              f'locations over the whole period.</p>')
-    o.append(bar_chart(site_lbl, site_val, color=BLUE, fmt=lambda v: f"{v:,.0f}"))
+    # Same counts as the table below (each trip credited to its nearest
+    # location), so a reader cannot find two different totals for one place.
+    o.append(bar_chart([r["label"] for r in site_rows],
+                       [r["near"] for r in site_rows],
+                       color=BLUE, fmt=lambda v: f"{v:,.0f}"))
     o.append(f'<div class="takeaway"><strong>{live_sites} of {len(sites)}</strong> '
              f'locations get real traffic, and the busiest three take a large '
              f'share of it. Some of the quiet ones were only installed '
@@ -468,6 +727,7 @@ def build(out_path: Path) -> Path:
              f'{merged_sites} of which are made up of more than one rack. '
              f'Trips are counted against the nearest location, so nothing is '
              f'counted twice where two locations sit close together.</p>')
+    o.append('<div class="tablewrap">')
     o.append("<table><thead><tr><th>Location</th><th>Racks in it</th>"
              "<th class='num'>Racks</th><th class='num'>Charging points</th>"
              f"<th class='num'>Trips within {S.DOCK_RADIUS_M:.0f} m</th>"
@@ -488,7 +748,7 @@ def build(out_path: Path) -> Path:
              f'<td class="num"><strong>{sum(r["wide"] for r in site_rows):,}</strong></td>'
              f'<td class="num"><strong>{sum(r["kwh"] for r in site_rows):,.0f}</strong></td>'
              f'</tr>')
-    o.append("</tbody></table>")
+    o.append("</tbody></table></div>")
     o.append("</div>")
 
     # ---- fleet reach ------------------------------------------------------
@@ -519,13 +779,26 @@ def build(out_path: Path) -> Path:
     o.append(f"<li><strong>{dock_rate:.0f} trips in 100 end at a station.</strong> "
              f"The other {100 - dock_rate:.0f} finish somewhere else in the "
              f"city.</li>")
+    o.append(f"<li><strong>Ending at a station rarely means being put on "
+             f"one.</strong> Of the {ft['ends']:,} trips that end within "
+             f"{S.DOCK_RADIUS_M:.0f} metres of a station, "
+             f"{ft30['docked_or_charged_pct']:.1f}% see that scooter docked or "
+             f"charged at that same station within 30 minutes, and "
+             f"{ft30['charged_pct']:.1f}% draw power.</li>")
     o.append(f"<li><strong>{veh_share:.0f}% of scooters reach a station in a "
              f"given week.</strong> So the network is within range of most of "
              f"the fleet, even though few trips finish there.</li>")
+    o.append(f"<li><strong>Even the scooters that use a station get "
+             f"{cov_pct:.0f}% of their energy from us.</strong> Over the six "
+             f"full weeks those scooters needed {cov_need:,.0f} kWh and the "
+             f"stations gave them {cov_given:,.0f} kWh, against "
+             f"{cov_fleet_pct:.0f}% for the whole fleet.</li>")
+    _top3_kwh = sum(r["kwh"] for r in sorted(site_rows, key=lambda r: -r["kwh"])[:3])
     o.append(f"<li><strong>Use is concentrated in a few locations.</strong> "
-             f"{live_sites} of {len(sites)} sites get real traffic, and the "
-             f"busiest three take a large share of it. Some of the quiet ones "
-             f"were only installed recently.</li>")
+             f"{live_sites} of {len(sites)} sites get real traffic, the busiest "
+             f"three take a large share of the trips, and the three largest "
+             f"deliver {100.0 * _top3_kwh / supplied:.0f}% of all the energy. "
+             f"Some of the quiet ones were only installed recently.</li>")
     o.append("</ul>")
     o.append("</div>")
 
@@ -542,7 +815,16 @@ def build(out_path: Path) -> Path:
     print(f"  energy catered    : {catered:.1f}%  ({supplied:,.0f} of {need_total:,.0f} kWh)")
     print(f"  docking rate      : {dock_rate:.1f}%")
     print(f"  weekly reach      : {veh_share:.1f}%")
-    print(f"  energy supplied   : {supplied:,.0f} kWh")
+    print(f"  energy supplied   : {supplied:,.0f} kWh "
+          f"({chg.n_charge_sessions:,} charging sessions, "
+          f"{chg.n_dock_events:,} dock events)")
+    print(f"  visitor coverage  : {cov_pct:.1f}%  ({cov_given:,.0f} of "
+          f"{cov_need:,.0f} kWh)  vs fleet {cov_fleet_pct:.1f}%")
+    print(f"  follow-through    : {ft30['docked_or_charged_pct']:.1f}% docked or "
+          f"charged within 30 min, {ft30['charged_pct']:.1f}% drew power "
+          f"(of {ft['ends']:,} trips)")
+    print(f"  pie: stations {pie[0]['pct']:.0f}% + swaps {pie[1]['pct']:.0f}% = "
+          f"{sum(s['value'] for s in pie):,.1f} kWh (need total {need_total:,.1f})")
     print(f"  wrote             : {out_path}  ({out_path.stat().st_size:,} bytes)")
     return out_path
 

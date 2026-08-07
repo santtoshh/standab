@@ -65,6 +65,24 @@ thousands separators inside ``duration_in_s`` (``thousands=','``), and
 ``started_at`` / ``finished_at`` formatted as ``"June 15, 2026, 07:24"``
 (``'%B %d, %Y, %H:%M'``).
 
+Dock events with no energy
+--------------------------
+The export contains rows with ``energy_used_in_wh == 0`` exactly: a vehicle was
+placed on a receptacle and the receptacle logged the visit, but no power moved.
+Those rows are **kept**, because they are the physical event the capacity
+question turns on. The loader tags every row with ``is_charge = kwh > 0`` and
+the rest of the module splits on that flag rather than on row count:
+
+* **Energy** metrics (kWh delivered, percent catered, per-site kWh, kWh per
+  session) are computed over ``is_charge`` rows only. Averaging kWh over rows
+  that cannot contain kWh would understate what a charging session delivers.
+* **Occupancy and capacity** metrics are computed over **all** rows. A docked
+  vehicle holds its receptacle whether or not it draws power, so excluding the
+  zero-energy rows understates how full the racks are.
+* **Counts** always name which population they mean: "charging sessions" for
+  ``is_charge`` rows, "dock events" for the zero-energy rows, and "dock or
+  charge events" for the union.
+
 **Timezone.** The charging export is in UTC; the ride exports are Finnish local
 time (UTC+3, EEST). ``CHARGING_TZ_SHIFT_H`` hours are added to every charging
 timestamp before any joining or bucketing. See that constant for how the offset
@@ -188,8 +206,10 @@ DEFAULT_RIDE_FILES = [
 ]
 DEFAULT_CHARGING_FILE = (
     "/Users/santtoshmohan/Downloads/"
-    "charging_report_2026-08-07T11_10_28.250929411+02_00.csv"
+    "charging_report_2026-08-07T14_29_58.60950524+02_00.csv"
 )
+
+OCCUPANCY_TICK = "15min"   # resolution of the receptacle-occupancy sweep
 DEFAULT_RACK_FILE = _REPO_ROOT / "data" / "vaasa_racks.csv"
 DEFAULT_OUT = _REPO_ROOT / "reports" / "station_performance_report.html"
 
@@ -689,21 +709,46 @@ class ChargingDataError(Exception):
 
 @dataclass
 class Charging:
-    """A loaded, timezone-corrected, Ryde-only charging export."""
-    sessions: pd.DataFrame        # one row per session, local time in `started`
+    """A loaded, timezone-corrected, Ryde-only charging export.
+
+    ``sessions`` holds **every** logged receptacle event, charging or not, with
+    the ``is_charge`` column separating them. Reach for the property that names
+    the population you actually mean; there is no neutral "sessions" count.
+    """
+    sessions: pd.DataFrame        # one row per event, local time in `started`
     tz_shift_h: int
     dropped_other_operator: int
     other_operators: list[str]
     dropped_no_qr: int
     unknown_racks: list[str]
+    dock_events: int = 0          # rows with energy_used_in_wh == 0 exactly
+
+    @property
+    def charges(self) -> pd.DataFrame:
+        """Rows that actually delivered energy. The basis of every kWh metric."""
+        return self.sessions.loc[self.sessions["is_charge"]]
+
+    @property
+    def docks(self) -> pd.DataFrame:
+        """Rows that held a receptacle without delivering energy."""
+        return self.sessions.loc[~self.sessions["is_charge"]]
 
     @property
     def total_kwh(self) -> float:
-        return float(self.sessions["kwh"].sum())
+        return float(self.charges["kwh"].sum())
 
     @property
-    def n_sessions(self) -> int:
+    def n_events(self) -> int:
+        """Dock or charge events: every row. The occupancy denominator."""
         return int(len(self.sessions))
+
+    @property
+    def n_charge_sessions(self) -> int:
+        return int(self.sessions["is_charge"].sum())
+
+    @property
+    def n_dock_events(self) -> int:
+        return int((~self.sessions["is_charge"]).sum())
 
 
 def load_charging(path: str | Path, racks: list[Rack],
@@ -749,6 +794,14 @@ def load_charging(path: str | Path, racks: list[Rack],
         raise ChargingDataError(
             f"{int(started.isna().sum())} of {len(df)} started_at values do not "
             f"match the expected format '{CHG_TIME_FORMAT}'; examples: {bad}")
+    # finished_at matters as much as started_at: occupancy_series sorts on it,
+    # and NaT sorts last, so a single unparseable value would leave that event
+    # open forever and silently inflate every occupancy figure.
+    if finished.isna().any():
+        bad = df.loc[finished.isna(), "finished_at"].head(3).tolist()
+        raise ChargingDataError(
+            f"{int(finished.isna().sum())} of {len(df)} finished_at values do "
+            f"not match the expected format '{CHG_TIME_FORMAT}'; examples: {bad}")
 
     energy_wh = pd.to_numeric(df["energy_used_in_wh"], errors="coerce")
     if energy_wh.isna().any():
@@ -757,11 +810,18 @@ def load_charging(path: str | Path, racks: list[Rack],
     if (energy_wh < 0).any():
         raise ChargingDataError("negative energy_used_in_wh values present")
 
+    # Zero-energy rows are DOCK EVENTS, not noise. The receptacle logged a
+    # vehicle and delivered nothing. They are kept because occupancy is decided
+    # by the vehicle being there, not by current flowing, and they are tagged so
+    # that no energy metric can quietly average them in.
+    is_charge = (energy_wh > 0).to_numpy()
+
     shift = pd.Timedelta(hours=tz_shift_h)
     out = pd.DataFrame({
         "rack_id": df["rack_id"].astype(str).str.strip(),
         "receptacle_id": df["receptacle_id"],
         "kwh": energy_wh / 1000.0,
+        "is_charge": is_charge,
         "started": started + shift,
         "finished": finished + shift,
         "duration_s": pd.to_numeric(df["duration_in_s"], errors="coerce"),
@@ -788,7 +848,8 @@ def load_charging(path: str | Path, racks: list[Rack],
     return Charging(sessions=out.sort_values("started").reset_index(drop=True),
                     tz_shift_h=tz_shift_h,
                     dropped_other_operator=dropped_op, other_operators=others,
-                    dropped_no_qr=dropped_no_qr, unknown_racks=unknown)
+                    dropped_no_qr=dropped_no_qr, unknown_racks=unknown,
+                    dock_events=int((~is_charge).sum()))
 
 
 def attach_sites(chg: Charging, racks: list[Rack], sites: list[Site]) -> None:
@@ -801,8 +862,162 @@ def attach_sites(chg: Charging, racks: list[Rack], sites: list[Site]) -> None:
 
 
 def charging_by_gran(chg: Charging, gran: str) -> pd.Series:
+    """kWh delivered per period. Charging sessions only, by definition."""
     key = {"day": "date", "week": "week", "month": "month"}[gran]
-    return chg.sessions.groupby(key)["kwh"].sum().sort_index()
+    return chg.charges.groupby(key)["kwh"].sum().sort_index()
+
+
+def events_by_gran(chg: Charging, gran: str) -> pd.DataFrame:
+    """Charging sessions and dock events per period, counted separately."""
+    key = {"day": "date", "week": "week", "month": "month"}[gran]
+    g = chg.sessions.groupby(key)["is_charge"]
+    out = pd.DataFrame({"charge_sessions": g.sum().astype(int),
+                        "events": g.size().astype(int)})
+    out["dock_events"] = out["events"] - out["charge_sessions"]
+    return out.sort_index()
+
+
+# --------------------------------------------------------------------------- #
+# Receptacle occupancy (dock events included, on purpose)
+# --------------------------------------------------------------------------- #
+
+def total_receptacles(racks: list[Rack]) -> int:
+    """Physical charging points across the whole registry."""
+    return int(sum(r.receptacles for r in racks))
+
+
+def occupancy_series(sessions: pd.DataFrame,
+                     tick: str = OCCUPANCY_TICK) -> pd.DataFrame:
+    """Receptacles held at each tick, by counting overlapping events.
+
+    Pass **all** rows, charging and dock alike: an event occupies a receptacle
+    from ``started`` to ``finished`` whether or not it is drawing power, and a
+    vehicle parked on a rack denies that point to the next vehicle either way.
+    Filtering to ``is_charge`` here would answer a different question and would
+    report the racks as emptier than they physically were.
+
+    Counted by two sorted searches rather than a tick-by-tick scan: at time
+    ``t`` the number of open events is (events started at or before ``t``) minus
+    (events finished at or before ``t``), which is exact for the half-open
+    interval ``[started, finished)``.
+    """
+    if sessions.empty:
+        return pd.DataFrame(columns=["t", "occ", "week"])
+    t0 = sessions["started"].min().floor("D")
+    t1 = sessions["finished"].max().ceil("D")
+    ticks = pd.date_range(t0, t1, freq=tick)
+    tv = ticks.to_numpy(dtype="datetime64[ns]")
+    st = np.sort(sessions["started"].to_numpy(dtype="datetime64[ns]"))
+    fi = np.sort(sessions["finished"].to_numpy(dtype="datetime64[ns]"))
+    occ = (np.searchsorted(st, tv, side="right")
+           - np.searchsorted(fi, tv, side="right"))
+    out = pd.DataFrame({"t": ticks, "occ": occ.astype(int)})
+    out["week"] = (out["t"].dt.normalize()
+                   - pd.to_timedelta(out["t"].dt.weekday, unit="D"))
+    return out
+
+
+def full_charging_weeks(df: pd.DataFrame, chg: Charging) -> list[pd.Timestamp]:
+    """ISO weeks covered for all seven days by both exports at once.
+
+    The stations came online part-way through the first week and the ride export
+    stops part-way through the last, so those two weeks are shorter
+    observations, not smaller values.
+    """
+    chg_start = chg.sessions["started"].min()
+    ride_end = df["start_time"].max()
+    weeks = (pd.Timestamp(w) for w in pd.unique(df["week"]))
+    return sorted(w for w in weeks
+                  if w >= chg_start and w + pd.Timedelta(days=7) <= ride_end)
+
+
+# --------------------------------------------------------------------------- #
+# Coverage for the vehicles that actually reach a station
+# --------------------------------------------------------------------------- #
+
+def station_visitor_coverage(df: pd.DataFrame, chg: Charging) -> pd.DataFrame:
+    """Weekly energy coverage for the vehicles that visited a station.
+
+    Fleet-wide coverage mixes together vehicles that never go near a rack. This
+    narrows the question to the vehicles that did: for each week, take the
+    vehicles with at least one ride ending within ``DOCK_RADIUS_M`` of a site
+    that week, then compare the energy *those* vehicles needed that week (their
+    rides x ``WH_PER_RIDE``) against the energy the stations gave *those same*
+    vehicles that week.
+
+    Energy given is summed over charging sessions only; a dock event that
+    delivered nothing gave the vehicle nothing. ``df`` must already carry the
+    ``docked`` column from ``assign_docking``.
+    """
+    veh = df["vehicle_id"].astype(str)
+    rows = []
+    for w in full_charging_weeks(df, chg):
+        dw = df.loc[df["week"] == w]
+        vw = veh.loc[dw.index]
+        visitors = set(vw.loc[dw["docked"].to_numpy()])
+        their_rides = int(vw.isin(visitors).sum())
+        cw = chg.charges.loc[chg.charges["week"] == w]
+        given = float(cw.loc[cw["veh"].isin(visitors), "kwh"].sum())
+        need = float(energy_need_kwh(their_rides))
+        fleet_need = float(energy_need_kwh(len(dw)))
+        fleet_given = float(cw["kwh"].sum())
+        rows.append({
+            "week": w,
+            "riding": int(vw.nunique()),
+            "visitors": len(visitors),
+            "visitor_pct": 100.0 * len(visitors) / max(1, vw.nunique()),
+            "visitor_rides": their_rides,
+            "need_kwh": need,
+            "given_kwh": given,
+            "coverage_pct": 100.0 * given / need if need else float("nan"),
+            "fleet_need_kwh": fleet_need,
+            "fleet_given_kwh": fleet_given,
+            "fleet_coverage_pct": (100.0 * fleet_given / fleet_need
+                                   if fleet_need else float("nan")),
+        })
+    return pd.DataFrame(rows).set_index("week")
+
+
+def site_follow_through(df: pd.DataFrame, chg: Charging, sites: list[Site],
+                        windows_min: tuple[float, ...] = (30.0, 1440.0)) -> dict:
+    """Of trips ending at a site, how many are followed by a dock or a charge?
+
+    A trip end within ``DOCK_RADIUS_M`` of a site is matched to that vehicle's
+    next receptacle event at the **same** site. Both figures are returned for
+    every window: ``docked_or_charged`` counts any event, ``charged`` counts the
+    subset that drew power. Only the next event is considered, so ``charged``
+    is a strict subset of ``docked_or_charged`` rather than a separate search.
+    """
+    if "site" not in chg.sessions.columns:
+        raise ValueError("site_follow_through needs attach_sites(chg, racks, "
+                         "sites) to have been called first")
+    el, eo = df["end_lat"].to_numpy(), df["end_lon"].to_numpy()
+    d = np.stack([np.where(np.isnan(haversine_m(s.lat, s.lon, el, eo)), np.inf,
+                           haversine_m(s.lat, s.lon, el, eo)) for s in sites])
+    near = d.min(axis=0) <= DOCK_RADIUS_M
+    at = df.loc[near, ["end_time"]].copy()
+    at["veh"] = df.loc[near, "vehicle_id"].astype(str)
+    at["site"] = d.argmin(axis=0)[near]
+    at = at.sort_values("end_time")
+    out = {"ends": int(len(at)), "windows": {}}
+    if at.empty:
+        return out
+    ev = (chg.sessions.dropna(subset=["veh"])[["veh", "started", "site", "is_charge"]]
+          .sort_values("started"))
+    m = pd.merge_asof(at, ev, left_on="end_time", right_on="started", by="veh",
+                      direction="forward")
+    same = m["site_x"].eq(m["site_y"]).to_numpy()
+    gap = ((m["started"] - m["end_time"]).dt.total_seconds() / 60.0).to_numpy()
+    drew = m["is_charge"].eq(True).to_numpy()
+    for lim in windows_min:
+        hit = same & (gap <= lim)
+        out["windows"][lim] = {
+            "docked_or_charged": int(hit.sum()),
+            "docked_or_charged_pct": 100.0 * hit.sum() / len(at),
+            "charged": int((hit & drew).sum()),
+            "charged_pct": 100.0 * (hit & drew).sum() / len(at),
+        }
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -874,7 +1089,12 @@ def _gap_bucket(gap_min: np.ndarray, rider: np.ndarray) -> np.ndarray:
 
 
 def classify_sessions(chg: Charging, poslog: pd.DataFrame) -> pd.DataFrame:
-    """Label every charging session by how its vehicle got to the rack.
+    """Label every dock or charge event by how its vehicle got to the rack.
+
+    This is a question about arrival, not about energy, so it runs over **all**
+    events. A vehicle a rider placed on a rack that then drew no power still
+    arrived by rider. The ``is_charge`` column survives the join, so the caller
+    can narrow to charging sessions where that is the population it means.
 
     ``rider-docked`` = the vehicle's own preceding ride ended within
     ``RIDER_DOCK_RADIUS_M`` of *that same rack* and less than
@@ -911,17 +1131,22 @@ def reverse_plugin_rate(poslog: pd.DataFrame, chg: Charging, racks: list[Rack],
 
     The mirror image of ``classify_sessions``: it asks the question from the
     rider's side. To be a true mirror the plug-in must happen at the *same rack*
-    the rider parked beside — the forward rule requires the ride to have ended
+    the rider parked beside. The forward rule requires the ride to have ended
     within ``RIDER_DOCK_RADIUS_M`` of the rack that logged the session, so
     accepting a plug-in at any rack would count a different event (the vehicle
     was moved, then charged elsewhere).
 
-    Returns both, because the gap between them is itself informative:
-      ``pct``           - same-rack plug-ins (the strict mirror)
-      ``pct_any_rack``  - plug-in at any rack (upper bound; includes vehicles
+    Returns three, because the gaps between them are informative:
+      ``pct``           - same-rack dock or charge event (the strict mirror)
+      ``pct_charge``    - the subset of those that actually drew power
+      ``pct_any_rack``  - event at any rack (upper bound; includes vehicles
                           collected from this rack and charged at another)
+
+    Only the vehicle's next event is considered, so ``pct_charge`` is a strict
+    subset of ``pct`` rather than an independent search.
     """
-    cols = ["ends", "plugged", "pct", "plugged_any", "pct_any_rack"]
+    cols = ["ends", "plugged", "pct", "plugged_charge", "pct_charge",
+            "plugged_any", "pct_any_rack"]
     if poslog.empty:
         return pd.DataFrame(columns=cols)
     rlat = np.array([r.lat for r in racks], dtype=float)
@@ -939,22 +1164,29 @@ def reverse_plugin_rate(poslog: pd.DataFrame, chg: Charging, racks: list[Rack],
         return pd.DataFrame(columns=cols)
 
     at_rack = at_rack.sort_values("end_time")
-    starts = (chg.sessions.dropna(subset=["veh"])[["veh", "started", "rack_id"]]
+    starts = (chg.sessions.dropna(subset=["veh"])
+              [["veh", "started", "rack_id", "is_charge"]]
               .rename(columns={"rack_id": "charged_rack_id"})
               .sort_values("started"))
     r = pd.merge_asof(at_rack, starts, left_on="end_time", right_on="started",
                       left_by="vehicle_id", right_by="veh", direction="forward")
     within = ((r["started"] - r["end_time"]).dt.total_seconds() / 60.0
               <= REVERSE_PLUG_WINDOW_MIN).fillna(False)
+    # merge_asof leaves NaN where nothing matched; eq(True) reads that as False
+    # without the object-dtype fillna downcast warning.
+    drew = r["is_charge"].eq(True)
     r["plugged_any"] = within
     r["plugged"] = within & (r["charged_rack_id"] == r["parked_rack_id"])
+    r["plugged_charge"] = r["plugged"] & drew
     r["week"] = (r["end_time"].dt.normalize()
                  - pd.to_timedelta(r["end_time"].dt.weekday, unit="D"))
     g = r.groupby("week")
     out = pd.DataFrame({"ends": g.size(),
                         "plugged": g["plugged"].sum(),
+                        "plugged_charge": g["plugged_charge"].sum(),
                         "plugged_any": g["plugged_any"].sum()})
     out["pct"] = 100.0 * out["plugged"] / out["ends"].replace(0, np.nan)
+    out["pct_charge"] = 100.0 * out["plugged_charge"] / out["ends"].replace(0, np.nan)
     out["pct_any_rack"] = 100.0 * out["plugged_any"] / out["ends"].replace(0, np.nan)
     out.index.name = "period"
     return out.sort_index()
@@ -962,10 +1194,18 @@ def reverse_plugin_rate(poslog: pd.DataFrame, chg: Charging, racks: list[Rack],
 
 def rack_commissioning(chg: Charging, racks: list[Rack],
                        lag_days: int = COMMISSION_LAG_DAYS) -> pd.DataFrame:
-    """First-session date per rack, so newness is not read as failure."""
+    """First-event date per rack, so newness is not read as failure.
+
+    Commissioning is dated from the first event of any kind: a rack that logged
+    a vehicle but delivered no power was already installed and reporting. The
+    kWh column stays on charging sessions, and the two counts are separate.
+    """
     g = chg.sessions.groupby("rack_id").agg(
         first_session=("started", "min"), last_session=("started", "max"),
-        sessions=("kwh", "size"), kwh=("kwh", "sum"))
+        events=("kwh", "size"), sessions=("is_charge", "sum"))
+    g["sessions"] = g["sessions"].astype(int)
+    g["dock_events"] = g["events"] - g["sessions"]
+    g["kwh"] = chg.charges.groupby("rack_id")["kwh"].sum().reindex(g.index).fillna(0.0)
     fleet_start = chg.sessions["started"].min()
     g["days_late"] = (g["first_session"] - fleet_start).dt.total_seconds() / 86400.0
     g["late"] = g["days_late"] >= lag_days
@@ -989,10 +1229,13 @@ def depot_profile(chg: Charging, poslog: pd.DataFrame, racks: list[Rack],
                         rack.lat, rack.lon)
         ends_near = int((d <= RIDER_DOCK_RADIUS_M).sum())
     n_here = max(1, len(here))
+    mine = s["rack_id"] == rack_id
     return {
         "rack_id": rack_id,
-        "sessions": int((s["rack_id"] == rack_id).sum()),
-        "kwh": float(s.loc[s["rack_id"] == rack_id, "kwh"].sum()),
+        "events": int(mine.sum()),
+        "sessions": int((mine & s["is_charge"]).sum()),
+        "dock_events": int((mine & ~s["is_charge"]).sum()),
+        "kwh": float(s.loc[mine & s["is_charge"], "kwh"].sum()),
         "vehicles": len(here),
         "also_elsewhere": len(here & elsewhere),
         "also_elsewhere_pct": 100.0 * len(here & elsewhere) / n_here,
@@ -1540,12 +1783,12 @@ def build_report(df: pd.DataFrame, poslog: pd.DataFrame, sites: list[Site],
             need_g = list(energy_need_kwh(util[g]["rides"]))
             pct_catered[g] = [None if (s is None or not nd) else 100.0 * s / nd
                               for s, nd in zip(vals, need_g)]
-        # Sessions after the last ride day sit outside every plotted period.
-        chg_outside = int(((charging.sessions["started"] < data_start)
-                           | (charging.sessions["started"] >= data_end)).sum())
-        chg_outside_kwh = float(charging.sessions.loc[
-            (charging.sessions["started"] < data_start)
-            | (charging.sessions["started"] >= data_end), "kwh"].sum())
+        # Events after the last ride day sit outside every plotted period.
+        _off = ((charging.sessions["started"] < data_start)
+                | (charging.sessions["started"] >= data_end))
+        chg_outside = int(_off.sum())
+        chg_outside_kwh = float(
+            charging.sessions.loc[_off & charging.sessions["is_charge"], "kwh"].sum())
     else:
         chg_outside, chg_outside_kwh = 0, 0.0
 
@@ -1556,7 +1799,7 @@ def build_report(df: pd.DataFrame, poslog: pd.DataFrame, sites: list[Site],
     period_txt = (f"{data_start.strftime('%d %b %Y')} - "
                   f"{(data_end - pd.Timedelta(days=1)).strftime('%d %b %Y')}")
     out.append('<header class="masthead">')
-    out.append("<h1>Station Performance Report &mdash; Vaasa</h1>")
+    out.append("<h1>Station Performance Report: Vaasa</h1>")
     out.append(f'<p class="sub">{esc(period_txt)} &middot; {n_days} days &middot; '
                f'{len(sites)} merged station sites from {len(racks)} racks '
                f'&middot; {DOCK_RADIUS_M:.0f} m docking radius</p>')
@@ -1577,7 +1820,7 @@ def build_report(df: pd.DataFrame, poslog: pd.DataFrame, sites: list[Site],
     out.append("<h2>Method, filters and data quality</h2>")
     out.append('<p class="note">Every number in this report is computed on the '
                'filtered ride set described below. The waterfall reconciles '
-               'exactly &mdash; no rows are silently lost.</p>')
+               'exactly. No rows are silently lost.</p>')
 
     out.append("<h3>Filter waterfall</h3>")
     out.append('<div class="wf">')
@@ -1595,7 +1838,7 @@ def build_report(df: pd.DataFrame, poslog: pd.DataFrame, sites: list[Site],
     out.append(drop_step(wf.dropped_short,
                          f"Rides &lt; {MIN_RIDE_M:.0f} m start&rarr;end"))
     out.append(f'<div class="step"><div class="n">{fmt_int(wf.kept)}</div>'
-               f'<div class="l">Rides kept &mdash; the analysis set</div></div>')
+               f'<div class="l">Rides kept, the analysis set</div></div>')
     out.append("</div>")
     ok = wf.reconciles()
     out.append(f'<p class="note">Reconciliation: {fmt_int(wf.raw_rows)} raw = '
@@ -1637,7 +1880,7 @@ def build_report(df: pd.DataFrame, poslog: pd.DataFrame, sites: list[Site],
         out.append(error_card(
             "The charging export could not be used", charging_error,
             extra=('<p>Sections 3, 4 and 6 are blank as a result. Every '
-                   'ride-side number in this report is unaffected &mdash; they '
+                   'ride-side number in this report is unaffected. They '
                    'are computed from the ride exports alone.</p>')))
     elif not have_chg:
         out.append('<p class="note">No charging export was supplied '
@@ -1645,16 +1888,35 @@ def build_report(df: pd.DataFrame, poslog: pd.DataFrame, sites: list[Site],
                    'blank.</p>')
     else:
         out.append('<div class="stats">')
-        out.append(stat("Charging sessions", fmt_int(charging.n_sessions),
-                        f"operator = {CHARGING_OPERATOR} only"))
+        out.append(stat("Dock or charge events", fmt_int(charging.n_events),
+                        f"every row, operator = {CHARGING_OPERATOR} only"))
+        out.append(stat("Charging sessions", fmt_int(charging.n_charge_sessions),
+                        "delivered more than 0 Wh"))
+        out.append(stat("Dock events, no power", fmt_int(charging.n_dock_events),
+                        f"{fmt_pct(100.0 * charging.n_dock_events / max(1, charging.n_events))} "
+                        f"of all events"))
+        out.append(stat("Energy supplied", f"{fmt_1(charging.total_kwh)} kWh",
+                        "sum over charging sessions"))
         out.append(stat("Racks reporting", fmt_int(charging.sessions["rack_id"].nunique()),
                         f"of {len(racks)} in the registry"))
-        out.append(stat("Energy supplied", f"{fmt_1(charging.total_kwh)} kWh",
-                        "sum over all sessions"))
         out.append(stat("Charging window",
                         f"{chg_start.strftime('%d %b')}-{chg_end.strftime('%d %b')}",
                         "local time, after correction"))
         out.append("</div>")
+        _dock_h = charging.docks["duration_s"] / 3600.0
+        out.append(f'<p class="note"><strong>Zero-energy rows are dock events '
+                   f'and are kept.</strong> {fmt_int(charging.n_dock_events)} of '
+                   f'the {fmt_int(charging.n_events)} rows in this export record '
+                   f'a vehicle placed on a receptacle that then drew no power at '
+                   f'all. They are counted in <strong>occupancy</strong>, because '
+                   f'a parked vehicle holds its charging point either way, and '
+                   f'excluded from <strong>every energy figure</strong>, because '
+                   f'averaging kWh over rows that cannot contain kWh would '
+                   f'understate what a charging session delivers. They are not '
+                   f'brief: the median lasts {float(_dock_h.median()):.2f} h, '
+                   f'{fmt_int(int((_dock_h > 6).sum()))} run past 6 hours and '
+                   f'{fmt_int(int((_dock_h > 24).sum()))} past 24. Counts on this '
+                   f'page always name which population they mean.</p>')
 
         # Compare against the shift that was ACTUALLY applied, not the module
         # default: a run with --charging-tz-shift 0 must fail this check, and
@@ -1683,10 +1945,10 @@ def build_report(df: pd.DataFrame, poslog: pd.DataFrame, sites: list[Site],
                 f'local time (UTC+3, EEST), so '
                 f'<strong>{applied:+d} h is added to every charging '
                 f'timestamp</strong> before any join or bucketing. That offset is '
-                f'not assumed &mdash; it is measured, and re-measured on every '
+                f'not assumed. It is measured, and re-measured on every '
                 f'run. Sweeping candidate offsets from '
                 f'{TZ_SCAN_OFFSETS[0]:+d} h to {TZ_SCAN_OFFSETS[-1]:+d} h and '
-                f'counting sessions whose vehicle&rsquo;s own preceding ride '
+                f'counting events whose vehicle&rsquo;s own preceding ride '
                 f'ended within {RIDER_DOCK_RADIUS_M:.0f} m of that rack and less '
                 f'than {RIDER_DOCK_GAP_MIN:.0f} min earlier gives a single sharp '
                 f'maximum:</p>')
@@ -1705,22 +1967,22 @@ def build_report(df: pd.DataFrame, poslog: pd.DataFrame, sites: list[Site],
                 out.append("</tr></tbody></table></div>")
             out.append('<p class="note">An offset that is merely close would not '
                        'do this: the runner-up offsets produce a handful of '
-                       'matches at 600&ndash;1,100 m, i.e. unrelated earlier '
+                       'matches at 600 to 1,100 m, i.e. unrelated earlier '
                        'trips. Getting this wrong would not blur Section 6, it '
                        'would invert it.</p>')
 
         if charging.dropped_other_operator:
             out.append(f'<p class="note">Filtered out '
-                       f'{fmt_int(charging.dropped_other_operator)} session(s) '
+                       f'{fmt_int(charging.dropped_other_operator)} event(s) '
                        f'from other operator(s): '
                        f'{esc(", ".join(charging.other_operators))}.</p>')
         if charging.dropped_no_qr:
             out.append(f'<p class="note">{fmt_int(charging.dropped_no_qr)} '
-                       f'session(s) carry no parseable vehicle QR and are kept in '
+                       f'event(s) carry no parseable vehicle QR and are kept in '
                        f'energy totals but cannot be joined to a ride; they are '
                        f'excluded from Section 6 only.</p>')
         if chg_outside:
-            out.append(f'<p class="note">{fmt_int(chg_outside)} session(s) '
+            out.append(f'<p class="note">{fmt_int(chg_outside)} event(s) '
                        f'({fmt_1(chg_outside_kwh)} kWh) fall outside the ride '
                        f'window and so sit off the right-hand edge of the charts. '
                        f'They remain in the whole-period supply total.</p>')
@@ -1747,7 +2009,7 @@ def build_report(df: pd.DataFrame, poslog: pd.DataFrame, sites: list[Site],
                f"racks resolve into {hinge_below} sites; the count holds at "
                f"{hinge_n} from {hinge_lo:.2f} m up to {esc(hi_txt)}, so the "
                f"{MERGE_RADIUS_M:.0f} m choice sits inside a plateau rather than "
-               f"on a knife edge. The threshold is not being changed &mdash; this "
+               f"on a knife edge. The threshold is not being changed. This "
                f"is disclosure, not a retraction.</li>")
     out.append(f"<li><strong>Sub-{MIN_RIDE_M:.0f} m exclusion</strong>: rides whose "
                f"straight-line start&rarr;end haversine distance is under "
@@ -1763,7 +2025,7 @@ def build_report(df: pd.DataFrame, poslog: pd.DataFrame, sites: list[Site],
                "docking radius (97.1 m, 95.6 m and 83.7 m apart), so their "
                "capture buffers overlap. Each docked end is attributed to its "
                "<em>nearest</em> site, which makes the share column in Section 5 "
-               "a true partition rather than a double count &mdash; but it also "
+               "a true partition rather than a double count, but it also "
                "means a site next to a busier neighbour loses every contested "
                "end. Section 5 therefore also shows the plain "
                f"{DOCK_RADIUS_M:.0f} m buffer count, and the "
@@ -1771,8 +2033,8 @@ def build_report(df: pd.DataFrame, poslog: pd.DataFrame, sites: list[Site],
                "only.</li>")
     out.append("<li><strong>Weeks</strong> are ISO weeks (Monday start) computed "
                "from local naive timestamps. Partial weeks at either end of the "
-               "window are shaded on every chart &mdash; they are not real "
-               "declines &mdash; and are never labelled or treated as a peak or "
+               "window are shaded on every chart, because they are not real "
+               "declines, and are never labelled or treated as a peak or "
                "trough.</li>")
     out.append("<li><strong>Full-weeks-only KPI rule</strong>: every headline "
                "number derived from a weekly series is computed over "
@@ -1797,6 +2059,23 @@ def build_report(df: pd.DataFrame, poslog: pd.DataFrame, sites: list[Site],
                    f"in every energy total and are excluded from the "
                    f"rider-behaviour metrics in Section 6; both figures are shown "
                    f"either way.</li>")
+    if have_chg:
+        _dh = charging.docks["duration_s"] / 3600.0
+        out.append(f"<li><strong>Dock events with no energy</strong>: "
+                   f"{fmt_int(charging.n_dock_events)} of the "
+                   f"{fmt_int(charging.n_events)} rows in the charging export "
+                   f"record <code>energy_used_in_wh = 0</code> exactly. They are "
+                   f"<strong>included in occupancy and capacity</strong>, because "
+                   f"a vehicle on a rack holds its charging point whether or not "
+                   f"it draws power, and <strong>excluded from every energy "
+                   f"figure</strong>, including kWh delivered, percent catered, "
+                   f"per-site kWh and kWh per session. They are long enough to "
+                   f"matter: median {float(_dh.median()):.2f} h, "
+                   f"{fmt_int(int((_dh > 6).sum()))} over 6 hours and "
+                   f"{fmt_int(int((_dh > 24).sum()))} over 24. Every count on "
+                   f"this page names the population it uses: "
+                   f"&ldquo;charging sessions&rdquo;, &ldquo;dock events&rdquo; "
+                   f"or &ldquo;dock or charge events&rdquo;.</li>")
     out.append("<li><strong>Rides are attributed to the period of their start "
                "time.</strong></li>")
     out.append("</ul>")
@@ -1878,7 +2157,8 @@ def build_report(df: pd.DataFrame, poslog: pd.DataFrame, sites: list[Site],
         out.append(f'<div class="defn">Demand is modelled '
                    f'(rides &times; {WH_PER_RIDE} Wh); supply is metered '
                    f'(the sum of <code>energy_used_in_wh</code> over Ryde '
-                   f'charging sessions). The two are separate panels sharing one '
+                   f'charging sessions, which is every row that delivered more '
+                   f'than 0 Wh). The two are separate panels sharing one '
                    f'x-axis, not two y-axes on one plot: kWh and % are different '
                    f'quantities and overlaying them would let the eye read a '
                    f'crossing point that does not exist.</div>')
@@ -1893,7 +2173,7 @@ def build_report(df: pd.DataFrame, poslog: pd.DataFrame, sites: list[Site],
         out.append(stat("Energy need", f"{fmt_int(total_kwh)} kWh",
                         f"{fmt_int(total_rides)} rides × {WH_PER_RIDE} Wh"))
         out.append(stat("Energy supplied", f"{fmt_1(total_supply_kwh)} kWh",
-                        f"{fmt_int(charging.n_sessions)} sessions"))
+                        f"{fmt_int(charging.n_charge_sessions)} charging sessions"))
         out.append(stat("Shortfall", f"{fmt_int(total_kwh - total_supply_kwh)} kWh",
                         "covered by battery swaps"))
         out.append("</div>")
@@ -1919,7 +2199,7 @@ def build_report(df: pd.DataFrame, poslog: pd.DataFrame, sites: list[Site],
         out.append(toggle_block("supply", svgs))
         out.append(f'<p class="legendnote">Ryde charging begins '
                    f'{chg_start.strftime("%d %b %Y")}. Periods that end before '
-                   f'that are drawn as <strong>gaps, not zeros</strong> &mdash; '
+                   f'that are drawn as <strong>gaps, not zeros</strong>. '
                    f'{data_start.strftime("%d %b")} had no stations to supply '
                    f'anything, which is a different statement from stations '
                    f'supplying nothing.</p>')
@@ -1940,7 +2220,7 @@ def build_report(df: pd.DataFrame, poslog: pd.DataFrame, sites: list[Site],
                'that rode that period) and <em>rides per fleet vehicle per day</em> '
                '(denominator = all distinct vehicles seen in the whole period). '
                'Fleet-active share is also shown as a percentage so it can sit on '
-               'the same 0&ndash;100% axis as percent-catered without a second '
+               'the same 0 to 100% axis as percent-catered without a second '
                'y-scale.</div>')
     svgs = {}
     for g in grans:
@@ -1974,7 +2254,7 @@ def build_report(df: pd.DataFrame, poslog: pd.DataFrame, sites: list[Site],
                    "exports alone and is unaffected.</p>")))
     else:
         out.append('<p class="note">Both percentage series sit on one axis '
-                   'because they are both percentages &mdash; but they are not '
+                   'because they are both percentages, but they are not '
                    'two views of one thing. Fleet-active share moves with '
                    'ridership; percent-catered moves with how much charging '
                    'hardware exists and how much of it gets used. Reading a '
@@ -1982,21 +2262,34 @@ def build_report(df: pd.DataFrame, poslog: pd.DataFrame, sites: list[Site],
                    'window contains one summer and no intervention.</p>')
 
         # ---- per-station supply ----
+        # kWh and kWh-per-session come from charging sessions only; the dock
+        # column is carried beside them so the reader can see how much of a
+        # site's traffic moved no energy at all.
         out.append("<h3>Supply by station</h3>")
+        out.append('<p class="note">Energy columns count <strong>charging '
+                   'sessions</strong> only. <strong>Dock events</strong> is the '
+                   'separate count of vehicles that held a receptacle here and '
+                   'drew no power; they are excluded from every kWh figure in '
+                   'this table and included in the occupancy figures below '
+                   'it.</p>')
         s = charging.sessions
-        by_site = s.groupby("site").agg(kwh=("kwh", "sum"), sessions=("kwh", "size"))
+        by_site_k = charging.charges.groupby("site")["kwh"].sum()
+        by_site_n = charging.charges.groupby("site").size()
+        by_site_d = charging.docks.groupby("site").size()
         site_rec = {st.index: sum(racks[i].receptacles for i in st.rack_indices)
                     for st in sites}
         buf = buffer_end_counts(df, sites)
         rows = []
         for st in sites:
-            k = float(by_site["kwh"].get(st.index, 0.0))
-            ns = int(by_site["sessions"].get(st.index, 0))
+            k = float(by_site_k.get(st.index, 0.0))
+            ns = int(by_site_n.get(st.index, 0))
+            nd = int(by_site_d.get(st.index, 0))
             rec = site_rec[st.index]
             rack_ids = [racks[i].rack_id for i in st.rack_indices]
             rows.append({
                 "site": st.name, "racks": st.rack_count, "recept": rec,
-                "kwh": k, "sessions": ns,
+                "kwh": k, "sessions": ns, "docks": nd,
+                "kwh_per_sess": k / ns if ns else float("nan"),
                 "kwh_per_rec": k / rec if rec else float("nan"),
                 "share": 100.0 * k / total_supply_kwh if total_supply_kwh else 0.0,
                 "ends": int(buf[st.index]),
@@ -2005,25 +2298,61 @@ def build_report(df: pd.DataFrame, poslog: pd.DataFrame, sites: list[Site],
             })
         rows.sort(key=lambda r: -r["kwh"])
         out.append('<div class="tablewrap"><table><thead><tr><th>Site</th>'
-                   "<th>Racks</th><th>Receptacles</th><th>Sessions</th>"
-                   "<th>kWh supplied</th><th>kWh / receptacle</th>"
+                   "<th>Racks</th><th>Receptacles</th><th>Charging sessions</th>"
+                   "<th>Dock events</th><th>kWh supplied</th>"
+                   "<th>kWh / session</th><th>kWh / receptacle</th>"
                    f"<th>Share of supply</th><th>Ride-ends within "
                    f"{DOCK_RADIUS_M:.0f} m</th></tr></thead><tbody>")
         for r in rows:
             nm = r["site"] + (" &middot; depot" if r["depot"] else "")
             out.append(
                 f'<tr><td>{nm}</td><td>{r["racks"]}</td><td>{r["recept"]}</td>'
-                f'<td>{fmt_int(r["sessions"])}</td><td>{fmt_1(r["kwh"])}</td>'
+                f'<td>{fmt_int(r["sessions"])}</td><td>{fmt_int(r["docks"])}</td>'
+                f'<td>{fmt_1(r["kwh"])}</td><td>{r["kwh_per_sess"]:.3f}</td>'
                 f'<td>{fmt_1(r["kwh_per_rec"])}</td>'
                 f'<td>{fmt_pct(r["share"])}</td>'
                 f'<td>{fmt_int(r["ends"])}</td></tr>')
+        _tot_n = sum(r["sessions"] for r in rows)
+        _tot_k = sum(r["kwh"] for r in rows)
         out.append(f'<tr><td><strong>Total</strong></td>'
                    f'<td>{sum(r["racks"] for r in rows)}</td>'
                    f'<td>{sum(r["recept"] for r in rows)}</td>'
-                   f'<td>{fmt_int(sum(r["sessions"] for r in rows))}</td>'
-                   f'<td><strong>{fmt_1(sum(r["kwh"] for r in rows))}</strong></td>'
+                   f'<td>{fmt_int(_tot_n)}</td>'
+                   f'<td>{fmt_int(sum(r["docks"] for r in rows))}</td>'
+                   f'<td><strong>{fmt_1(_tot_k)}</strong></td>'
+                   f'<td>{_tot_k / max(1, _tot_n):.3f}</td>'
                    f'<td></td><td>100.0%</td><td></td></tr>')
         out.append("</tbody></table></div>")
+
+        # ---- receptacle occupancy, dock events included ----
+        occ = occupancy_series(charging.sessions)
+        occ_chg = occupancy_series(charging.charges)
+        n_rec = total_receptacles(racks)
+        out.append("<h3>Receptacle occupancy</h3>")
+        out.append(f'<p class="note">How many of the {n_rec} charging points '
+                   f'were held at once, sampled every 15 minutes across the '
+                   f'whole window. This is the one place where the zero-energy '
+                   f'rows change an answer, so both readings are given. Counting '
+                   f'only charging sessions the network never passes '
+                   f'{fmt_int(int(occ_chg["occ"].max()))} points. Counting every '
+                   f'dock or charge event it reaches '
+                   f'{fmt_int(int(occ["occ"].max()))}. The second is the '
+                   f'physically correct one: a vehicle sitting on a rack denies '
+                   f'that point to the next vehicle whether or not it is drawing '
+                   f'current.</p>')
+        out.append('<div class="stats">')
+        out.append(stat("Peak points held at once",
+                        f'{fmt_int(int(occ["occ"].max()))} of {n_rec}',
+                        f'{fmt_pct(100.0 * int(occ["occ"].max()) / n_rec)} of the '
+                        f'network, dock events included'))
+        out.append(stat("Typical points held",
+                        f'{float(occ["occ"].mean()):.0f} of {n_rec}',
+                        f'{fmt_pct(100.0 * float(occ["occ"].mean()) / n_rec)}, '
+                        f'mean over every 15-minute tick'))
+        out.append(stat("Peak, charging sessions only",
+                        f'{fmt_int(int(occ_chg["occ"].max()))} of {n_rec}',
+                        "what the export showed before dock events"))
+        out.append("</div>")
 
         # ---- commissioning dates ----
         comm = rack_commissioning(charging, racks)
@@ -2031,12 +2360,15 @@ def build_report(df: pd.DataFrame, poslog: pd.DataFrame, sites: list[Site],
         out.append("<h3>Rack commissioning</h3>")
         out.append(f'<p class="note">A rack that only came online in the last '
                    f'weeks of the window has a low session count because it is '
-                   f'new, not because it is failing. First-session dates make '
+                   f'new, not because it is failing. First-event dates make '
                    f'that distinction; {len(late)} of {len(comm)} racks started '
-                   f'more than {COMMISSION_LAG_DAYS} days after the first session '
-                   f'in the export.</p>')
+                   f'more than {COMMISSION_LAG_DAYS} days after the first event '
+                   f'in the export. A rack is dated from its first event of any '
+                   f'kind, because a rack that logged a vehicle and delivered no '
+                   f'power was already installed and reporting.</p>')
         out.append('<div class="tablewrap"><table><thead><tr><th>Rack</th>'
-                   "<th>Site</th><th>First session</th><th>Sessions</th>"
+                   "<th>Site</th><th>First event</th>"
+                   "<th>Charging sessions</th><th>Dock events</th>"
                    "<th>kWh</th><th>kWh / receptacle</th><th>Note</th>"
                    "</tr></thead><tbody>")
         rack_site = {racks[i].rack_id: st.name for st in sites for i in st.rack_indices}
@@ -2051,7 +2383,9 @@ def build_report(df: pd.DataFrame, poslog: pd.DataFrame, sites: list[Site],
             out.append(
                 f'<tr><td>{esc(rid)}</td><td>{esc(rack_site.get(rid, "-"))}</td>'
                 f'<td>{r["first_session"].strftime("%d %b %Y")}</td>'
-                f'<td>{fmt_int(r["sessions"])}</td><td>{fmt_1(r["kwh"])}</td>'
+                f'<td>{fmt_int(r["sessions"])}</td>'
+                f'<td>{fmt_int(r["dock_events"])}</td>'
+                f'<td>{fmt_1(r["kwh"])}</td>'
                 f'<td>{fmt_1(r["kwh_per_receptacle"])}</td>'
                 f'<td{cls} style="text-align:left">{esc("; ".join(notes))}</td>'
                 f'</tr>')
@@ -2065,8 +2399,10 @@ def build_report(df: pd.DataFrame, poslog: pd.DataFrame, sites: list[Site],
             out.append(
                 f'<div class="caveat"><strong>Rack {esc(rid)} looks like a '
                 f'depot, not a station.</strong> It ran '
-                f'{fmt_int(prof["sessions"])} sessions for '
-                f'{fmt_1(prof["kwh"])} kWh &mdash; ordinary volume &mdash; but '
+                f'{fmt_int(prof["sessions"])} charging sessions for '
+                f'{fmt_1(prof["kwh"])} kWh, plus '
+                f'{fmt_int(prof["dock_events"])} dock events that drew no '
+                f'power, which is ordinary volume, but '
                 f'only {fmt_int(prof["ride_ends_within_radius"])} ride-ends in '
                 f'the entire window finished within {RIDER_DOCK_RADIUS_M:.0f} m '
                 f'of it, and {fmt_pct(prof["also_elsewhere_pct"])} of the '
@@ -2152,7 +2488,7 @@ def build_report(df: pd.DataFrame, poslog: pd.DataFrame, sites: list[Site],
                f'{fmt_pct(100.0 * df.loc[~df["has_end"], "start_docked"].mean())} '
                f'of the time, against '
                f'{fmt_pct(100.0 * df.loc[df["has_end"], "start_docked"].mean())} '
-               f'for rides that do report one &mdash; they are biased '
+               f'for rides that do report one. They are biased '
                f'<em>towards</em> stations, exactly where docking is decided.</p>')
     out.append(f'<p class="note">Bounding the true rate between "every '
                f'unassessable ride failed" and "every unassessable ride docked" '
@@ -2161,7 +2497,7 @@ def build_report(df: pd.DataFrame, poslog: pd.DataFrame, sites: list[Site],
                f'[{fmt_1(wd.loc[trough_wk, "lo_pct"])}%, '
                f'{fmt_1(wd.loc[trough_wk, "hi_pct"])}%] for the trough. '
                f'{"Those brackets overlap, so the two weeks cannot be ordered at all" if overlap else "Those brackets are disjoint"} '
-               f'&mdash; the movement is indistinguishable from a GPS-logging '
+               f'. The movement is indistinguishable from a GPS-logging '
                f'regression that began in mid-July. Investigate the logging '
                f'pipeline before treating this as rider behaviour.</p>')
     out.append("</div>")
@@ -2191,7 +2527,7 @@ def build_report(df: pd.DataFrame, poslog: pd.DataFrame, sites: list[Site],
                f'{fmt_int(docked_total)} docked ends exactly and the shares sum '
                f'to 100%. <strong>Within {DOCK_RADIUS_M:.0f} m</strong> counts '
                f'every end inside a site&rsquo;s own buffer regardless of what '
-               f'else is nearby, so it does not partition &mdash; and it is the '
+               f'else is nearby, so it does not partition, and it is the '
                f'only one of the two that answers &ldquo;is this hardware being '
                f'used&rdquo;.</div>')
     out.append('<div class="tablewrap"><table><thead><tr><th>Site</th>'
@@ -2251,17 +2587,24 @@ def build_report(df: pd.DataFrame, poslog: pd.DataFrame, sites: list[Site],
         out.append(error_card(
             "Section unavailable",
             charging_error or "No charging export was supplied (--charging).",
-            extra=("<p>This section needs charging sessions joined to rides; "
+            extra=("<p>This section needs receptacle events joined to rides; "
                    "ride data alone shows where vehicles stop, not whether "
-                   "anyone plugged them in.</p>")))
+                   "anyone put them on a rack.</p>")))
     else:
+        # Arrival, not energy: this runs over every dock or charge event. The
+        # charging-only share is carried alongside so the reader can see the
+        # finding does not depend on which population is counted.
         cls_all = classify_sessions(charging, poslog)
         cls = cls_all.loc[~cls_all["rack_id"].isin(DEPOT_RACK_IDS)]
         rider_pct = 100.0 * float(cls["rider_docked"].mean())
         rider_pct_all = 100.0 * float(cls_all["rider_docked"].mean())
         n_rider = int(cls["rider_docked"].sum())
+        cls_charge = cls.loc[cls["is_charge"]]
+        n_charge_cls = int(len(cls_charge))
+        rider_pct_charge = (100.0 * float(cls_charge["rider_docked"].mean())
+                            if n_charge_cls else float("nan"))
         pv, shares = docking_attribution(cls)
-        # Of sessions whose vehicle HAS a known ride in the previous 24 h.
+        # Of events whose vehicle HAS a known ride in the previous 24 h.
         known = cls.loc[cls["bucket"] != GAP_BUCKET_LABELS[-1]]
         stale_4_24 = (100.0 * (known["bucket"] == "4-24 h").sum()
                       / max(1, len(known)))
@@ -2273,6 +2616,8 @@ def build_report(df: pd.DataFrame, poslog: pd.DataFrame, sites: list[Site],
                                   since=chg_start.normalize())
         reverse_pct = (100.0 * rev["plugged"].sum() / rev["ends"].sum()
                        if not rev.empty else float("nan"))
+        reverse_pct_charge = (100.0 * rev["plugged_charge"].sum() / rev["ends"].sum()
+                              if not rev.empty else float("nan"))
         reverse_pct_any = (100.0 * rev["plugged_any"].sum() / rev["ends"].sum()
                            if not rev.empty else float("nan"))
 
@@ -2289,27 +2634,37 @@ def build_report(df: pd.DataFrame, poslog: pd.DataFrame, sites: list[Site],
                    f'when the vehicle&rsquo;s own preceding ride ended within '
                    f'{RIDER_DOCK_RADIUS_M:.0f} m of <em>that same rack</em> and '
                    f'less than {RIDER_DOCK_GAP_MIN:.0f} minutes before the '
-                   f'session started &mdash; someone rode it there and plugged it '
-                   f'in. Every other session is bucketed by how stale that '
-                   f'preceding ride is. The join is '
+                   f'session started. Someone rode it there and put it on the '
+                   f'rack. Every other event is bucketed by how stale that '
+                   f'preceding ride is. This section counts '
+                   f'<strong>dock or charge events</strong>, not kWh: a vehicle '
+                   f'a rider placed on a rack still arrived by rider even when '
+                   f'no power moved, so the zero-energy rows belong here. The '
+                   f'join is '
                    f'<code>merge_asof(by=vehicle, direction=&quot;backward&quot;)</code> '
                    f'on the vehicle&rsquo;s last ride-end before each session.</div>')
 
         out.append('<div class="keyfind">')
         out.append(f'<p class="lede">Riders park at the stations. They very '
-                   f'rarely plug in. Of {fmt_int(len(cls))} charging sessions, '
-                   f'<strong>{fmt_pct(rider_pct)}</strong> ({fmt_int(n_rider)}) '
+                   f'rarely put a vehicle on a rack. Of {fmt_int(len(cls))} dock '
+                   f'or charge events, <strong>{fmt_pct(rider_pct)}</strong> '
+                   f'({fmt_int(n_rider)}) '
                    f'follow the vehicle&rsquo;s own ride ending at that rack '
-                   f'minutes earlier. Looked at from the other direction, of the '
+                   f'minutes earlier. Narrowed to the {fmt_int(n_charge_cls)} of '
+                   f'those events that actually delivered energy the share is '
+                   f'{fmt_pct(rider_pct_charge)}, so the finding does not rest on '
+                   f'which population is counted. Looked at from the other '
+                   f'direction, of the '
                    f'{fmt_int(int(rev["ends"].sum()))} ride-ends that finished '
                    f'within {RIDER_DOCK_RADIUS_M:.0f} m of a rack while the '
                    f'stations were live, <strong>{fmt_pct(reverse_pct)}</strong> '
-                   f'were followed by a charging session within '
-                   f'{REVERSE_PLUG_WINDOW_MIN:.0f} minutes.</p>')
-        out.append(f'<p class="note">The remaining sessions are consistent with '
+                   f'were followed by that vehicle being docked or charged at '
+                   f'the same rack within {REVERSE_PLUG_WINDOW_MIN:.0f} minutes, '
+                   f'and {fmt_pct(reverse_pct_charge)} drew power.</p>')
+        out.append(f'<p class="note">The remaining events are consistent with '
                    f'operations staff collecting and docking vehicles: '
-                   f'{fmt_pct(stale_4_24)} of sessions with a known preceding '
-                   f'ride start 4&ndash;24 hours after it, and '
+                   f'{fmt_pct(stale_4_24)} of events with a known preceding '
+                   f'ride start 4 to 24 hours after it, and '
                    f'{fmt_pct(float(shares[GAP_BUCKET_LABELS[-1]]))} follow no '
                    f'ride at all in the previous 24 hours. This is a description '
                    f'of how the system is being used, not a verdict on it: the '
@@ -2329,9 +2684,9 @@ def build_report(df: pd.DataFrame, poslog: pd.DataFrame, sites: list[Site],
                        "color": C_ORANGE, "kind": "line"}]
         out.append(svg_figure(
             pv_labels,
-            [Panel("Charging sessions per week, by how the vehicle got there",
+            [Panel("Dock or charge events per week, by how the vehicle got there",
                    series, fmt=fmt_int, stacked=True, height=225),
-             Panel("Rider-docked share of sessions", rider_line, fmt=fmt_1,
+             Panel("Rider-docked share of events", rider_line, fmt=fmt_1,
                    y_suffix="%", height=150)],
             partial=pv_partial, chart_id="whodocks"))
         out.append('<p class="legendnote">The gap buckets are an ordered '
@@ -2339,42 +2694,54 @@ def build_report(df: pd.DataFrame, poslog: pd.DataFrame, sites: list[Site],
                    'Rider-docked is not part of that order and takes the '
                    'contrasting colour.</p>')
 
-        out.append("<h3>Session attribution over the whole window</h3>")
+        out.append("<h3>Event attribution over the whole window</h3>")
+        out.append(f'<p class="note">Both counts, so neither can be mistaken for the other: <strong>dock or charge events</strong> is every row, <strong>of which drew power</strong> is the charging-session subset. Depot rack(s) excluded.</p>')
         out.append('<div class="tablewrap"><table><thead><tr>'
-                   "<th>How the vehicle reached the rack</th><th>Sessions</th>"
-                   "<th>Share</th></tr></thead><tbody>")
+                   "<th>How the vehicle reached the rack</th>"
+                   "<th>Dock or charge events</th><th>Share</th>"
+                   "<th>Of which drew power</th></tr></thead><tbody>")
         counts = cls["bucket"].value_counts()
+        counts_c = cls_charge["bucket"].value_counts()
         for name in ["rider-docked"] + GAP_BUCKET_LABELS:
             n = int(counts.get(name, 0))
+            nc = int(counts_c.get(name, 0))
             cls_a = ' class="flag"' if name == "rider-docked" else ""
             out.append(f'<tr><td{cls_a} style="text-align:left">{esc(name)}</td>'
                        f'<td>{fmt_int(n)}</td>'
-                       f'<td>{fmt_pct(100.0 * n / max(1, len(cls)))}</td></tr>')
+                       f'<td>{fmt_pct(100.0 * n / max(1, len(cls)))}</td>'
+                       f'<td>{fmt_int(nc)}</td></tr>')
         out.append(f'<tr><td><strong>Total</strong></td>'
                    f'<td><strong>{fmt_int(len(cls))}</strong></td>'
-                   f'<td>100.0%</td></tr>')
+                   f'<td>100.0%</td>'
+                   f'<td><strong>{fmt_int(n_charge_cls)}</strong></td></tr>')
         out.append("</tbody></table></div>")
 
         if not rev.empty:
             out.append("<h3>The reverse view, week by week</h3>")
             out.append(f'<p class="note">Of ride-ends that finished within '
                        f'{RIDER_DOCK_RADIUS_M:.0f} m of a rack, the share '
-                       f'followed by a charging session for that vehicle within '
-                       f'{REVERSE_PLUG_WINDOW_MIN:.0f} minutes. The strict mirror '
-                       f'of the forward rule requires the plug-in to happen at '
-                       f'<em>the same rack</em> the rider parked beside '
-                       f'({fmt_pct(reverse_pct)}); allowing a plug-in at any rack '
-                       f'raises it to {fmt_pct(reverse_pct_any)}, the difference '
-                       f'being vehicles collected from one rack and charged at '
-                       f'another. Both are shown; the same-rack figure is the '
-                       f'like-for-like comparison. Rack-level buffers, depot '
-                       f'rack(s) excluded.</p>')
+                       f'followed by that vehicle being docked or charged '
+                       f'within {REVERSE_PLUG_WINDOW_MIN:.0f} minutes. The '
+                       f'strict mirror of the forward rule requires it to happen '
+                       f'at <em>the same rack</em> the rider parked beside '
+                       f'({fmt_pct(reverse_pct)}), and '
+                       f'{fmt_pct(reverse_pct_charge)} of all such ride-ends '
+                       f'were followed by an event that drew power. Allowing an '
+                       f'event at any rack raises the headline to '
+                       f'{fmt_pct(reverse_pct_any)}, the difference being '
+                       f'vehicles collected from one rack and handled at '
+                       f'another. All three are shown; the same-rack figure is '
+                       f'the like-for-like comparison. Rack-level buffers, '
+                       f'depot rack(s) excluded.</p>')
             out.append(svg_figure(
                 period_labels(list(rev.index), "week"),
-                [Panel("Ride-ends at a rack that are followed by a plug-in",
-                       [{"name": "Same rack (strict mirror)",
+                [Panel("Ride-ends at a rack that are followed by a dock or a charge",
+                       [{"name": "Same rack, any event (strict mirror)",
                          "values": list(rev["pct"]),
                          "color": C_AQUA, "kind": "bar"},
+                        {"name": "Same rack, drew power",
+                         "values": list(rev["pct_charge"]),
+                         "color": C_BLUE, "kind": "line"},
                         {"name": "Any rack (upper bound)",
                          "values": list(rev["pct_any_rack"]),
                          "color": C_MUTED, "kind": "line"}], fmt=fmt_1,
@@ -2386,7 +2753,7 @@ def build_report(df: pd.DataFrame, poslog: pd.DataFrame, sites: list[Site],
         out.append('<ul class="assume">')
         out.append(f"<li><strong>It over-counts riders, so "
                    f"{fmt_pct(rider_pct)} is a ceiling.</strong> A van collecting "
-                   f"a scooter that was parked beside a rack and plugging it in "
+                   f"a scooter that was parked beside a rack and racking it "
                    f"within {RIDER_DOCK_GAP_MIN:.0f} minutes satisfies the rule "
                    f"exactly as a rider does. Nothing in either export "
                    f"distinguishes them.</li>")
@@ -2405,18 +2772,18 @@ def build_report(df: pd.DataFrame, poslog: pd.DataFrame, sites: list[Site],
                    f"{MIN_RIDE_M:.0f} m</strong>, which the rest of the report "
                    f"excludes: a short hop to a rack is exactly the event being "
                    f"measured. Applying the sub-{MIN_RIDE_M:.0f} m exclusion here "
-                   f"too would report {fmt_pct(rider_pct_filtered)} instead "
-                   f"&mdash; lower, and wrong, because it dates each vehicle from "
+                   f"too would report {fmt_pct(rider_pct_filtered)} instead. "
+                   f"That is lower, and wrong, because it dates each vehicle from "
                    f"an older trip than the one that actually put it at the "
                    f"rack.</li>")
-        out.append(f"<li><strong>{fmt_int(charging.dropped_no_qr)} session(s) "
+        out.append(f"<li><strong>{fmt_int(charging.dropped_no_qr)} event(s) "
                    f"cannot be joined</strong> for lack of a parseable vehicle QR "
                    f"and are excluded from this section only.</li>")
         out.append(f"<li><strong>Depot handling</strong>: the charts and shares "
                    f"above exclude rack(s) "
                    f"{esc(', '.join(sorted(DEPOT_RACK_IDS)))}. Including them, the "
                    f"rider-docked share is {fmt_pct(rider_pct_all)} of "
-                   f"{fmt_int(len(cls_all))} sessions &mdash; the direction of "
+                   f"{fmt_int(len(cls_all))} events. The direction of "
                    f"the finding does not depend on the exclusion.</li>")
         out.append("</ul>")
     out.append("</section>")
@@ -2439,7 +2806,7 @@ def build_report(df: pd.DataFrame, poslog: pd.DataFrame, sites: list[Site],
                f'week. <strong>Note the vocabulary</strong>: a vehicle that never '
                f'docks is not idle. Sections 1 and 4 use <em>active</em> to mean '
                f'&ldquo;rode at all&rdquo;, which is a different and much larger '
-               f'population &mdash; this section is about where rides end, not '
+               f'population. This section is about where rides end, not '
                f'whether they happen.</div>')
     out.append(svg_figure(
         va_labels,
@@ -2468,8 +2835,8 @@ def build_report(df: pd.DataFrame, poslog: pd.DataFrame, sites: list[Site],
     out.append(f'<p class="note">Both headline figures above cover complete weeks '
                f'only. Pooling the partial weeks at the ends of the window in as '
                f'well would give {fmt_pct(docked_share_all)}, which is not a '
-               f'statement about any week the fleet actually operated &mdash; '
-               f'it is the arithmetic of a 1-day stub and a 4-day stub diluting '
+               f'statement about any week the fleet actually operated. '
+               f'It is the arithmetic of a 1-day stub and a 4-day stub diluting '
                f'the real ones.</p>')
     out.append('<div class="tablewrap"><table><thead><tr><th>Week starting</th>'
                "<th>Rode</th><th>Docked</th><th>Never docked</th>"
@@ -2494,7 +2861,7 @@ def build_report(df: pd.DataFrame, poslog: pd.DataFrame, sites: list[Site],
     doc = (
         "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">"
         "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-        "<title>Station Performance Report &mdash; Vaasa</title>"
+        "<title>Station Performance Report: Vaasa</title>"
         f"<style>{CSS}</style></head><body>"
         + "".join(out)
         + f"<script>{JS}</script></body></html>"
@@ -2514,7 +2881,9 @@ def build_report(df: pd.DataFrame, poslog: pd.DataFrame, sites: list[Site],
         "total_kwh_need": total_kwh,
         "total_kwh_supplied": total_supply_kwh,
         "pct_catered": overall_catered,
-        "charging_sessions": charging.n_sessions if have_chg else 0,
+        "charging_sessions": charging.n_charge_sessions if have_chg else 0,
+        "dock_events": charging.n_dock_events if have_chg else 0,
+        "charging_events": charging.n_events if have_chg else 0,
         "rider_docked_pct": rider_pct,
         "rider_docked_pct_incl_depot": rider_pct_all,
         "reverse_plugin_pct": reverse_pct,
@@ -2650,10 +3019,38 @@ def run_self_tests(ride_paths: list[str], racks: list[Rack], sites: list[Site],
         return failures
     attach_sites(chg, racks, sites)
     check("charging export loads", True,
-          f"{chg.n_sessions:,} sessions, {chg.sessions['rack_id'].nunique()} racks, "
+          f"{chg.n_events:,} events, {chg.sessions['rack_id'].nunique()} racks, "
           f"{chg.total_kwh:,.1f} kWh")
     check(f"operator filter leaves {CHARGING_OPERATOR} only",
           set(chg.sessions["rack_id"]).issubset({r.rack_id for r in racks}))
+    # The re-export added zero-energy dock events. These are the counts the
+    # lead verified against the raw file; a silent filter would break them.
+    print(f"    dock or charge events : {chg.n_events:,}")
+    print(f"    charging sessions     : {chg.n_charge_sessions:,}")
+    print(f"    dock events, no power : {chg.n_dock_events:,} "
+          f"({100.0 * chg.n_dock_events / chg.n_events:.1f}%)")
+    check("Ryde row count is 8,363", chg.n_events == 8363, f"got {chg.n_events:,}")
+    check("zero-energy dock events are KEPT and number 2,991",
+          chg.n_dock_events == 2991, f"got {chg.n_dock_events:,}")
+    check("charging sessions number 5,372", chg.n_charge_sessions == 5372,
+          f"got {chg.n_charge_sessions:,}")
+    check("docks + charges account for every row",
+          chg.n_dock_events + chg.n_charge_sessions == chg.n_events)
+    check("dataclass dock_events matches the flag",
+          chg.dock_events == chg.n_dock_events)
+    check("no charging session has zero energy",
+          bool((chg.charges["kwh"] > 0).all()))
+    check("every dock event has exactly zero energy",
+          float(chg.docks["kwh"].abs().max() if len(chg.docks) else 0.0) == 0.0)
+    _dh = chg.docks["duration_s"] / 3600.0
+    print(f"    dock duration median  : {float(_dh.median()):.2f} h  "
+          f">6h {int((_dh > 6).sum())}  >12h {int((_dh > 12).sum())}  "
+          f">24h {int((_dh > 24).sum())}")
+    check("dock durations reproduce median 0.57 h",
+          abs(float(_dh.median()) - 0.57) <= 0.01, f"got {float(_dh.median()):.3f}")
+    check("dock durations reproduce 695 over 6 h, 480 over 12 h, 204 over 24 h",
+          (int((_dh > 6).sum()), int((_dh > 12).sum()), int((_dh > 24).sum()))
+          == (695, 480, 204))
     scan = scan_tz_offsets(chg, poslog)
     for _, r in scan.iterrows():
         mark = "  <-- configured" if int(r["offset_h"]) == tz_shift_h else ""
@@ -2667,39 +3064,156 @@ def run_self_tests(ride_paths: list[str], racks: list[Rack], sites: list[Site],
           scan["matches"].max() >= 2 * runner,
           f"{int(scan['matches'].max())} vs {int(runner)}")
 
-    print("\nTEST J - energy balance")
+    print("\nTEST J - energy balance, and dock events add no energy")
     need = float(energy_need_kwh(len(df)))
     catered = 100.0 * chg.total_kwh / need
     print(f"    demand {need:,.1f} kWh = {len(df):,} rides x {WH_PER_RIDE} Wh")
-    print(f"    supply {chg.total_kwh:,.1f} kWh over {chg.n_sessions:,} sessions")
-    check("share of demand catered reproduces 30.8% +/- 0.1pp",
-          abs(catered - 30.8) <= 0.1, f"got {catered:.2f}%")
+    print(f"    supply {chg.total_kwh:,.1f} kWh over "
+          f"{chg.n_charge_sessions:,} charging sessions")
+    check("Ryde energy total is 1,497.2 kWh",
+          abs(chg.total_kwh - 1497.2) <= 0.05, f"got {chg.total_kwh:,.2f}")
+    check("including dock events did not change the energy total",
+          abs(float(chg.sessions["kwh"].sum()) - chg.total_kwh) < 1e-9,
+          f"all rows {float(chg.sessions['kwh'].sum()):,.4f} vs charges "
+          f"{chg.total_kwh:,.4f}")
+    kwh_per = chg.total_kwh / chg.n_charge_sessions
+    kwh_per_diluted = chg.total_kwh / chg.n_events
+    print(f"    kWh per charging session : {kwh_per:.4f}")
+    print(f"    kWh per event if diluted : {kwh_per_diluted:.4f}  (NOT reported)")
+    check("kWh per session uses charging sessions, not every row",
+          kwh_per > kwh_per_diluted * 1.4,
+          f"{kwh_per:.4f} vs {kwh_per_diluted:.4f}")
+    check("share of demand catered reproduces 31.0% +/- 0.1pp",
+          abs(catered - 31.0) <= 0.1, f"got {catered:.2f}%")
 
     print("\nTEST K - per-site kWh partitions the total exactly")
-    by_site = chg.sessions.groupby("site")["kwh"].sum()
-    check("every session maps to a site", int(chg.sessions["site"].isna().sum()) == 0)
+    by_site = chg.charges.groupby("site")["kwh"].sum()
+    check("every event maps to a site", int(chg.sessions["site"].isna().sum()) == 0)
     check("sum of per-site kWh == total kWh",
           abs(float(by_site.sum()) - chg.total_kwh) < 1e-6,
           f"{by_site.sum():,.4f} vs {chg.total_kwh:,.4f}")
-    by_rack = chg.sessions.groupby("rack_id")["kwh"].sum()
+    by_rack = chg.charges.groupby("rack_id")["kwh"].sum()
     check("sum of per-rack kWh == total kWh",
           abs(float(by_rack.sum()) - chg.total_kwh) < 1e-6)
+    ev = events_by_gran(chg, "week")
+    check("weekly charge + dock counts reconcile to every row",
+          int(ev["events"].sum()) == chg.n_events
+          and int(ev["charge_sessions"].sum()) == chg.n_charge_sessions
+          and int(ev["dock_events"].sum()) == chg.n_dock_events)
 
-    print("\nTEST L - rider-docked share")
+    print("\nTEST N - receptacle occupancy, dock events included")
+    n_rec = total_receptacles(racks)
+    occ = occupancy_series(chg.sessions)
+    occ_c = occupancy_series(chg.charges)
+    peak, mean_occ = int(occ["occ"].max()), float(occ["occ"].mean())
+    print(f"    receptacles                 : {n_rec}")
+    print(f"    peak, dock events included  : {peak} "
+          f"({100.0 * peak / n_rec:.0f}%), mean {mean_occ:.1f}")
+    print(f"    peak, charging sessions only: {int(occ_c['occ'].max())}")
+    check("215 receptacles in the registry", n_rec == 215, f"got {n_rec}")
+    check("peak occupancy is 108 of 215", peak == 108 and n_rec == 215,
+          f"got {peak} of {n_rec}")
+    check("peak occupancy is half the network", abs(100.0 * peak / n_rec - 50.0) < 1.0,
+          f"got {100.0 * peak / n_rec:.1f}%")
+    check("mean occupancy is 57", abs(mean_occ - 57.0) <= 0.5, f"got {mean_occ:.1f}")
+    check("dock events raise the peak above the charging-only reading",
+          peak > int(occ_c["occ"].max()),
+          f"{peak} vs {int(occ_c['occ'].max())}")
+    check("occupancy never exceeds the physical receptacle count", peak <= n_rec)
+
+    print("\nTEST O - the busiest riding week is the emptiest")
+    rides_wk = df.groupby("week").size()
+    wks = full_charging_weeks(df, chg)
+    busy = max(wks, key=lambda w: int(rides_wk.get(w, 0)))
+    stats = {}
+    for w in wks:
+        sub = occ.loc[occ["week"] == w]
+        sw = chg.sessions.loc[chg.sessions["week"] == w]
+        stats[w] = (int(sw["is_charge"].sum()), int((~sw["is_charge"]).sum()),
+                    int(sub["occ"].max()), float(sub["occ"].mean()),
+                    float(sw.loc[sw["is_charge"], "kwh"].sum()))
+        print(f"    {w:%d %b}: {stats[w][0]:4d} charges / {stats[w][1]:4d} docks / "
+              f"peak {stats[w][2]:3d} / mean {stats[w][3]:5.1f} / "
+              f"{stats[w][4]:6.1f} kWh / {int(rides_wk.get(w, 0)):,} rides")
+    check("six full weeks, 22 Jun to 27 Jul", len(wks) == 6, f"got {len(wks)}")
+    check("the busiest riding week is 06 Jul", busy == pd.Timestamp("2026-07-06"),
+          f"got {busy:%d %b}")
+    check("the busiest riding week has the LOWEST mean occupancy",
+          stats[busy][3] == min(v[3] for v in stats.values()),
+          f"{stats[busy][3]:.1f} vs min {min(v[3] for v in stats.values()):.1f}")
+    check("the busiest riding week has the MOST charging sessions",
+          stats[busy][0] == max(v[0] for v in stats.values()))
+    check("busy-week mean occupancy is 42 of 215",
+          abs(stats[busy][3] - 42.0) <= 0.5, f"got {stats[busy][3]:.1f}")
+
+    print("\nTEST P - coverage for the vehicles that reach a station")
+    cov = station_visitor_coverage(df, chg)
+    for w, r in cov.iterrows():
+        print(f"    {w:%d %b}: {int(r['riding']):,} rode / {int(r['visitors']):,} "
+              f"visited ({r['visitor_pct']:.0f}%) / need {r['need_kwh']:.0f} kWh / "
+              f"given {r['given_kwh']:.0f} kWh / {r['coverage_pct']:.1f}% vs fleet "
+              f"{r['fleet_coverage_pct']:.1f}%")
+    v_need, v_given = float(cov["need_kwh"].sum()), float(cov["given_kwh"].sum())
+    v_pct = 100.0 * v_given / v_need
+    f_pct = 100.0 * float(cov["fleet_given_kwh"].sum()) / float(cov["fleet_need_kwh"].sum())
+    print(f"    station visitors: {v_given:,.1f} of {v_need:,.1f} kWh = {v_pct:.1f}%")
+    print(f"    whole fleet     : {f_pct:.1f}% over the same weeks")
+    check("station visitors needed 2,304 kWh", abs(v_need - 2304.0) <= 1.0,
+          f"got {v_need:,.1f}")
+    check("stations gave those vehicles 903 kWh", abs(v_given - 903.0) <= 1.0,
+          f"got {v_given:,.1f}")
+    check("station-visitor coverage is 39.2%", abs(v_pct - 39.2) <= 0.1,
+          f"got {v_pct:.2f}%")
+    check("fleet-wide coverage over the same weeks is 31.4%",
+          abs(f_pct - 31.4) <= 0.1, f"got {f_pct:.2f}%")
+    check("even the vehicles that reach a station get under half their energy",
+          v_pct < 50.0, f"got {v_pct:.1f}%")
+
+    print("\nTEST Q - docking follow-through at a site")
+    ft = site_follow_through(df, chg, sites)
+    w30, w24 = ft["windows"][30.0], ft["windows"][1440.0]
+    print(f"    trips ending within {DOCK_RADIUS_M:.0f} m of a site: {ft['ends']:,}")
+    print(f"    within 30 min: {w30['docked_or_charged']:,} "
+          f"({w30['docked_or_charged_pct']:.1f}%), drew power "
+          f"{w30['charged']:,} ({w30['charged_pct']:.1f}%)")
+    print(f"    within 24 h  : {w24['docked_or_charged']:,} "
+          f"({w24['docked_or_charged_pct']:.1f}%), drew power "
+          f"{w24['charged']:,} ({w24['charged_pct']:.1f}%)")
+    check("8,553 trips end within 50 m of a site", ft["ends"] == 8553,
+          f"got {ft['ends']:,}")
+    check("194 docked or charged within 30 min (2.3%)",
+          w30["docked_or_charged"] == 194 and abs(w30["docked_or_charged_pct"] - 2.3) <= 0.05)
+    check("160 of them drew power (1.9%)",
+          w30["charged"] == 160 and abs(w30["charged_pct"] - 1.9) <= 0.05)
+    check("1,100 docked or charged within 24 h (12.9%)",
+          w24["docked_or_charged"] == 1100 and abs(w24["docked_or_charged_pct"] - 12.9) <= 0.05)
+    check("812 of them drew power (9.5%)",
+          w24["charged"] == 812 and abs(w24["charged_pct"] - 9.5) <= 0.05)
+    check("the charged subset never exceeds the dock-or-charge count",
+          w30["charged"] <= w30["docked_or_charged"]
+          and w24["charged"] <= w24["docked_or_charged"])
+
+    print("\nTEST L - rider-docked share, on events and on charges alike")
     cls_all = classify_sessions(chg, poslog)
     cls = cls_all.loc[~cls_all["rack_id"].isin(DEPOT_RACK_IDS)]
     r_all = 100.0 * float(cls_all["rider_docked"].mean())
     r_ex = 100.0 * float(cls["rider_docked"].mean())
-    print(f"    all racks      : {int(cls_all['rider_docked'].sum())}/"
+    cls_c = cls.loc[cls["is_charge"]]
+    r_charge = 100.0 * float(cls_c["rider_docked"].mean())
+    print(f"    all events, all racks      : {int(cls_all['rider_docked'].sum())}/"
           f"{len(cls_all)} = {r_all:.2f}%")
-    print(f"    excluding depot: {int(cls['rider_docked'].sum())}/"
+    print(f"    all events, excluding depot: {int(cls['rider_docked'].sum())}/"
           f"{len(cls)} = {r_ex:.2f}%")
-    check("rider-docked share (all racks) reproduces ~3.0%",
-          abs(r_all - 3.03) <= 0.1, f"got {r_all:.2f}%")
+    print(f"    charges only, excl. depot  : {int(cls_c['rider_docked'].sum())}/"
+          f"{len(cls_c)} = {r_charge:.2f}%")
+    check("rider-docked share over all dock or charge events is ~2.4%",
+          abs(r_all - 2.37) <= 0.1, f"got {r_all:.2f}%")
     check("excluding the depot does not change the conclusion", r_ex < 5.0,
           f"got {r_ex:.2f}%")
+    check("narrowing to charging sessions does not change the conclusion",
+          r_charge < 5.0, f"got {r_charge:.2f}%")
     buckets = cls_all["bucket"].value_counts()
-    check("every session lands in exactly one bucket",
+    check("every event lands in exactly one bucket",
           int(buckets.sum()) == len(cls_all))
     # The section excludes depot racks from rider-behaviour metrics, so the
     # self-test exercises the same rack list the report renders.
@@ -2707,16 +3221,21 @@ def run_self_tests(ride_paths: list[str], racks: list[Rack], sites: list[Site],
     rev = reverse_plugin_rate(poslog, chg, rev_racks,
                               since=chg.sessions["started"].min().normalize())
     rpct = 100.0 * rev["plugged"].sum() / rev["ends"].sum()
+    rpct_c = 100.0 * rev["plugged_charge"].sum() / rev["ends"].sum()
     rpct_any = 100.0 * rev["plugged_any"].sum() / rev["ends"].sum()
-    print(f"    reverse, same rack (strict mirror): {int(rev['plugged'].sum())}/"
+    print(f"    reverse, same rack, any event  : {int(rev['plugged'].sum())}/"
           f"{int(rev['ends'].sum())} = {rpct:.2f}%")
-    print(f"    reverse, any rack (upper bound)   : "
+    print(f"    reverse, same rack, drew power : "
+          f"{int(rev['plugged_charge'].sum())}/{int(rev['ends'].sum())} = {rpct_c:.2f}%")
+    print(f"    reverse, any rack (upper bound): "
           f"{int(rev['plugged_any'].sum())}/{int(rev['ends'].sum())} = {rpct_any:.2f}%")
-    check("reverse plug-in rate, strict same-rack mirror, is ~1.6%",
-          abs(rpct - 1.64) <= 0.2, f"got {rpct:.2f}%")
+    check("reverse dock-or-charge rate, strict same-rack mirror, is ~2.0%",
+          abs(rpct - 1.98) <= 0.2, f"got {rpct:.2f}%")
+    check("the drew-power subset is smaller than the dock-or-charge count",
+          rpct_c < rpct, f"{rpct_c:.2f}% vs {rpct:.2f}%")
     check("any-rack upper bound exceeds the strict mirror", rpct_any > rpct,
           f"{rpct_any:.2f}% vs {rpct:.2f}%")
-    check("both reverse figures stay far below the forward rider-docked share",
+    check("every reverse figure stays far below the forward rider-docked share",
           rpct_any < 5.0, f"got {rpct_any:.2f}%")
 
     print("\nTEST M - depot and commissioning flags")
@@ -2725,14 +3244,21 @@ def run_self_tests(ride_paths: list[str], racks: list[Rack], sites: list[Site],
     print(f"    commissioned >= {COMMISSION_LAG_DAYS} days late: "
           + ", ".join(f"{i} ({comm.loc[i, 'first_session']:%d %b})" for i in late))
     check("mid-window commissioning is detected", len(late) >= 1)
+    check("per-rack charge and dock counts reconcile to every row",
+          int(comm["events"].sum()) == chg.n_events
+          and int(comm["sessions"].sum()) == chg.n_charge_sessions
+          and int(comm["dock_events"].sum()) == chg.n_dock_events)
     for rid in sorted(DEPOT_RACK_IDS):
         prof = depot_profile(chg, poslog, racks, rid)
-        print(f"    {rid}: {prof['sessions']} sessions, "
+        print(f"    {rid}: {prof['sessions']} charging sessions, "
+              f"{prof['dock_events']} dock events, "
               f"{prof['kwh']:.1f} kWh, {prof['ride_ends_within_radius']} ride-ends "
               f"within {RIDER_DOCK_RADIUS_M:.0f} m, "
               f"{prof['also_elsewhere_pct']:.1f}% of its vehicles also use other racks")
         check(f"{rid} has real charging volume but no rider traffic",
               prof["sessions"] > 100 and prof["ride_ends_within_radius"] < 10)
+        check(f"{rid} profile counts reconcile",
+              prof["sessions"] + prof["dock_events"] == prof["events"])
     return failures
 
 
@@ -2861,7 +3387,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  charging          : UNUSABLE - {headline['charging_error']}")
     else:
         print(f"  kWh supplied      : {headline['total_kwh_supplied']:,.1f} "
-              f"({headline['charging_sessions']:,} sessions)")
+              f"({headline['charging_sessions']:,} charging sessions, "
+          f"{headline['dock_events']:,} dock events)")
         print(f"  % of demand catered : {headline['pct_catered']:.2f}%")
         print(f"  rider-docked share: {headline['rider_docked_pct']:.2f}% "
               f"(incl. depot {headline['rider_docked_pct_incl_depot']:.2f}%)")
