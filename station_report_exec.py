@@ -147,25 +147,28 @@ def line_chart(labels: list[str], series: list[dict], *, y_suffix: str = "",
 
 
 def funnel_chart(steps: list[dict]) -> str:
-    """Stacked stages, each bar sized as a share of the stage above it.
+    """Stages on ONE shared scale, every bar measured against the first.
 
-    Sizing every bar against the first stage would make the last two invisible
-    (160 out of 105,100 is 0.15% of the width), which hides exactly the drop the
-    chart exists to show. Each bar is therefore drawn as its share of the stage
-    directly above, and both the count and that share are printed on the row so
-    nothing has to be inferred from the length alone.
+    Scaling each bar to the stage directly above it was tried and thrown out:
+    it drew the last stage at 82% of the track for a value of 160 while the
+    stage holding 8,553 sat at 2%, so bar length said the opposite of the
+    numbers. One scale for every bar is the only version a reader can trust,
+    even though it makes the small stages thin. Thin is the finding.
 
     ``steps`` are dicts with ``label``, ``value`` and ``note``.
     """
     W = 900
     row_h, gap, label_w = 62, 14, 300
-    bar_w = W - label_w - 20
+    # The share text gets its own column. Letting the bar track run to the edge
+    # put a full-width bar's value straight underneath it.
+    share_w = 200
+    bar_w = W - label_w - share_w - 16
+    base = steps[0]["value"] if steps else 0
     H = len(steps) * (row_h + gap) + 10
     p = [f'<svg viewBox="0 0 {W} {H}" role="img" style="width:100%;height:auto">']
     for i, s in enumerate(steps):
         y = i * (row_h + gap)
-        prev = steps[i - 1]["value"] if i else s["value"]
-        share = (s["value"] / prev * 100.0) if prev else 0.0
+        share = (s["value"] / base * 100.0) if base else 0.0
         w = max(bar_w * share / 100.0, 3.0)
         colour = s.get("color", BLUE)
         p.append(f'<text x="0" y="{y + 24:.0f}" font-size="15" font-weight="700" '
@@ -184,10 +187,10 @@ def funnel_chart(steps: list[dict]) -> str:
                  f'style="font-variant-numeric:tabular-nums">'
                  f'{s["value"]:,.0f}</text>')
         if i:
-            p.append(f'<text x="{W}" y="{y + row_h / 2 + 2:.0f}" font-size="14" '
-                     f'text-anchor="end" fill="{INK2}" '
+            p.append(f'<text x="{W}" y="{y + row_h / 2 + 2:.0f}" font-size="13.5" '
+                     f'text-anchor="end" fill="{MUTED}" '
                      f'style="font-variant-numeric:tabular-nums">'
-                     f'{share:.1f}% of the step above</text>')
+                     f'{share:.1f}% of the trips above</text>')
     p.append("</svg>")
     return "".join(p)
 
@@ -765,11 +768,10 @@ def build(out_path: Path) -> Path:
 
     o.append("<h3>What happens after a trip ends at a station</h3>")
     o.append(f'<p class="note">Leaving a scooter beside a rack is not the same '
-             f'as putting it on the rack. This follows every trip through to '
-             f'what happened next.</p>')
+             f'as putting it on the rack. Of the {rides:,} trips in the period, '
+             f'{ft["ends"]:,} ended at a station. Here is what happened to '
+             f'those {ft["ends"]:,}, all three bars drawn on the same scale.</p>')
     o.append(funnel_chart([
-        {"label": "All trips", "value": rides,
-         "note": f"over the {days} days", "color": MUTED},
         {"label": "Ended at a station",
          "value": ft["ends"],
          "note": f"within {S.DOCK_RADIUS_M:.0f} metres of one", "color": BLUE},
