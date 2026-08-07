@@ -450,6 +450,32 @@ def build(out_path: Path) -> Path:
     ft = S.site_follow_through(df, chg, sites)
     ft30, ft24 = ft["windows"][30.0], ft["windows"][1440.0]
 
+    # How much of the delivered energy came from a charge a rider triggered.
+    # Needed because the follow-through chart counts trips, and without this
+    # its last bar reads as "only 160 charges happened".
+    n_charge_sessions = len(chg.charges)
+    _rs = {s.name: s for s in sites}
+    _rack_site = {racks[i].rack_id: s.name for s in sites for i in s.rack_indices}
+    _d = df[df["docked"] & df["has_end"]].copy()
+    _d["vid"] = _d["vehicle_id"].astype(str)
+    _sd = np.stack([
+        np.where(np.isnan(S.haversine_m(s.lat, s.lon, _d.end_lat.values, _d.end_lon.values)),
+                 np.inf,
+                 S.haversine_m(s.lat, s.lon, _d.end_lat.values, _d.end_lon.values))
+        for s in sites])
+    _d["site"] = [sites[i].name for i in _sd.argmin(axis=0)]
+    _cc = chg.charges.dropna(subset=["veh"]).copy()
+    _cc["vid"] = _cc["veh"].astype(str)
+    _cc["csite"] = _cc["rack_id"].map(_rack_site)
+    _m = pd.merge_asof(_d[["end_time", "vid", "site"]].sort_values("end_time"),
+                       _cc[["started", "vid", "csite", "kwh"]].sort_values("started"),
+                       left_on="end_time", right_on="started", by="vid",
+                       direction="forward")
+    _hit = (((_m["started"] - _m["end_time"]).dt.total_seconds() / 60 <= 30.0)
+            & (_m["csite"] == _m["site"]) & _m["kwh"].notna())
+    rider_sessions = int(_hit.sum())
+    rider_kwh = float(_m.loc[_hit, "kwh"].sum())
+
     # Same measure at the wider radius, computed here so both live side by side.
     _dw = pd.DataFrame({
         "week": df["week"].values,
@@ -790,6 +816,18 @@ def build(out_path: Path) -> Path:
              f'full day instead of half an hour raises that to '
              f'{ft24["docked_or_charged_pct"]:.0f} in 100, which is the staff '
              f'collecting them later.</div>')
+    # A reader can otherwise take the last bar as the total number of charges.
+    # It is not: it counts trips that led to a charge, and almost all charging
+    # is of vehicles that were brought to the rack rather than ridden there.
+    o.append(f'<div class="takeaway">This chart counts trips, not charges. The '
+             f'stations ran <strong>{n_charge_sessions:,} charging sessions</strong> '
+             f'in total over the period, delivering the full '
+             f'{supplied:,.0f} kWh. Only <strong>{rider_sessions:,}</strong> of '
+             f'those followed a rider ending a trip at that station, worth '
+             f'<strong>{rider_kwh:.0f} kWh</strong>, or '
+             f'{100.0 * rider_kwh / supplied:.0f}% of the energy. The other '
+             f'{n_charge_sessions - rider_sessions:,} sessions were vehicles '
+             f'brought to the racks another way.</div>')
     o.append("</div>")
 
     # ---- stations ---------------------------------------------------------
