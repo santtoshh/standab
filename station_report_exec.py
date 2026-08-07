@@ -217,6 +217,9 @@ def build(out_path: Path) -> Path:
     dock_rate = 100.0 * wdf["docked"].sum() / wdf["assessable"].sum()
     veh_share = 100.0 * wvf["docked"].sum() / wvf["riding"].sum()
 
+    ut = S.fleet_utilisation(df, "week")
+    utf = S.full_periods(ut, partial)
+
     sup_w = S.charging_by_gran(chg, "week")
     wk_labels = [w.strftime("%-d %b") for w in wdf.index]
     need_w = [S.energy_need_kwh(int(wdf.loc[w, "rides"])) for w in wdf.index]
@@ -225,6 +228,15 @@ def build(out_path: Path) -> Path:
     dock_w = [float(wdf.loc[w, "dock_rate_pct"]) for w in wdf.index]
     vehs_w = [100.0 * wvf.loc[w, "docked"] / wvf.loc[w, "riding"] for w in wdf.index]
     unass_w = [float(wdf.loc[w, "unassessable_pct"]) for w in wdf.index]
+    util_used = [float(utf.loc[w, "rides_per_vehicle_per_day"]) for w in wdf.index]
+    util_fleet = [float(utf.loc[w, "rides_per_fleet_vehicle_per_day"]) for w in wdf.index]
+
+    # The busiest week is where the coverage story is clearest: supply is near
+    # constant, so the share covered bottoms out exactly when demand peaks.
+    _busy = int(np.argmax(util_used))
+    busy_wk = wdf.index[_busy].strftime("%-d %B")
+    busy_util = util_used[_busy]
+    busy_cat = cat_w[_busy]
 
     # Where the missing-GPS problem starts: first week whose unassessable share
     # is more than double the earliest week's. Beyond it the docking line is not
@@ -298,13 +310,41 @@ def build(out_path: Path) -> Path:
              f'Closing it is what more stations, or more use of the ones we have, '
              f'would buy us.</div>')
 
+    o.append(f'<div class="takeaway">Notice how flat the orange line is. The '
+             f'stations deliver roughly the same amount of energy every week '
+             f'&mdash; between {min(sup_wv):,.0f} and {max(sup_wv):,.0f} kWh '
+             f'&mdash; while what the fleet needs swings from '
+             f'{min(need_w):,.0f} to {max(need_w):,.0f} kWh.</div>')
+    o.append("</div>")
+
+    # ---- utilisation vs coverage -------------------------------------------
+    o.append('<div class="card">')
+    o.append("<h2>When the city gets busier, do the stations keep up?</h2>")
+    o.append(f'<p class="lead">&ldquo;Utilisation&rdquo; is how many trips each '
+             f'scooter does per day. The busier the fleet, the more energy it '
+             f'burns &mdash; so this asks whether station coverage holds up '
+             f'when demand rises.</p>')
+    o.append('<div class="chartttl">How hard each scooter is working &mdash; trips per day</div>')
+    o.append('<div class="legend">'
+             f'<span><i style="background:{BLUE}"></i>Per scooter that was in use</span>'
+             f'<span><i style="background:{MUTED}"></i>Per scooter in the whole fleet</span>'
+             "</div>")
+    o.append(line_chart(wk_labels,
+                        [{"values": util_used, "color": BLUE},
+                         {"values": util_fleet, "color": MUTED}],
+                        y_max=2.2, fmt=lambda v: f"{v:.1f}"))
     o.append('<div class="chartttl">Share of the fleet&rsquo;s energy covered by stations</div>')
     o.append(line_chart(wk_labels, [{"values": cat_w, "color": GREEN}],
                         y_suffix="%", y_max=60, fmt=lambda v: f"{v:,.0f}"))
-    o.append(f'<div class="takeaway good">This has held steady at roughly '
-             f'<strong>a third</strong> of the fleet&rsquo;s needs since the '
-             f'first full week &mdash; the stations are carrying a real, '
-             f'consistent share of the load.</div>')
+    o.append(f'<div class="takeaway warn">The two move in opposite directions. '
+             f'In the busiest week ({busy_wk}), when each scooter was doing '
+             f'<strong>{busy_util:.1f} trips a day</strong>, the stations '
+             f'covered only <strong>{busy_cat:.0f}%</strong> of the energy '
+             f'needed. In quieter weeks they cover a third or more. Because the '
+             f'stations give out a roughly fixed amount of energy each week, '
+             f'<strong>coverage falls exactly when the city needs it most</strong>. '
+             f'More capacity &mdash; more stations, or faster turnover at the '
+             f'ones we have &mdash; is what would change that.</div>')
     o.append("</div>")
 
     # ---- docking ----------------------------------------------------------
