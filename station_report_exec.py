@@ -770,38 +770,31 @@ def build(out_path: Path) -> Path:
                  f'whether docking actually fell. Treat the shaded part as '
                  f'unknown, not as a drop.</div>')
 
-    o.append("<h3>What happens after a trip ends at a station</h3>")
-    o.append(f'<p class="note">Leaving a scooter beside a rack is not the same '
-             f'as putting it on the rack. Of the {rides:,} trips in the period, '
-             f'{ft["ends"]:,} ended at a station. Here is what happened to '
-             f'those {ft["ends"]:,}, all three bars drawn on the same scale.</p>')
+    n_events = len(chg.sessions)
+    n_docks_only = len(chg.docks)
+    o.append("<h3>How often a scooter was actually put on a charging point</h3>")
+    o.append(f'<p class="note">The figures above count trips. This counts what '
+             f'the stations did, whether the scooter was ridden there or '
+             f'brought there. Over the {days} days a scooter was put on a point '
+             f'<strong>{n_events:,}</strong> times, about '
+             f'{n_events / days:.0f} a day.</p>')
     o.append(funnel_chart([
-        {"label": "Ended at a station",
-         "value": ft["ends"],
-         "note": f"within {S.DOCK_RADIUS_M:.0f} metres of one", "color": BLUE},
         {"label": "Put on a charging point",
-         "value": ft30["docked_or_charged"],
-         "note": "by anyone, within 30 minutes", "color": ORANGE},
-        {"label": "Actually took charge",
-         "value": ft30["charged"],
-         "note": "drew power, not just docked", "color": GREEN},
+         "value": n_events,
+         "note": f"about {n_events / days:.0f} times a day", "color": BLUE},
+        {"label": "Took charge",
+         "value": n_charge_sessions,
+         "note": f"delivered {supplied:,.0f} kWh between them", "color": GREEN},
+        {"label": "Took no charge",
+         "value": n_docks_only,
+         "note": "on a point but drew nothing", "color": MUTED},
     ]))
-    o.append(f'<div class="takeaway">Scooters do reach the stations and get '
-             f'parked next to them, but they are rarely put on a point by the '
-             f'person who rode them there. Out of every 100 trips that end at a '
-             f'station, about <strong>{ft30["docked_or_charged_pct"]:.0f}</strong> '
-             f'end with the scooter on a point within half an hour. Waiting a '
-             f'full day instead of half an hour raises that to '
-             f'{ft24["docked_or_charged_pct"]:.0f} in 100, which is the staff '
-             f'collecting them later.</div>')
-    # Without this a reader takes the last bar as the total number of charges.
-    # It counts trips that led to a charge, which is a much smaller population
-    # than the charging the stations actually did.
-    o.append(f'<div class="takeaway">This chart counts trips, not charges. Most '
-             f'scooters arrive at a rack without having just been ridden there, '
-             f'so the stations ran <strong>{n_charge_sessions:,} charging '
-             f'sessions</strong> in total over the period, delivering the full '
-             f'<strong>{supplied:,.0f} kWh</strong>.</div>')
+    o.append(f'<div class="takeaway"><strong>{n_charge_sessions:,}</strong> of '
+             f'those, about {100.0 * n_charge_sessions / n_events:.0f} in every '
+             f'100, drew power and together delivered the full '
+             f'<strong>{supplied:,.0f} kWh</strong>. The other '
+             f'{n_docks_only:,} sat on a point and drew nothing. The data does '
+             f'not say why.</div>')
     o.append("</div>")
 
     # ---- stations ---------------------------------------------------------
