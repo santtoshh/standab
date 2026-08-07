@@ -45,6 +45,14 @@ BAND = "#f0efea"
 W, H = 900, 300          # chart viewBox; scales to container width
 PAD_L, PAD_R, PAD_T, PAD_B = 62, 26, 30, 46
 
+# Trips are counted as ending at a station at two distances. 50 m is "at the
+# rack". 100 m is "on the same corner", which is a fairer test of whether the
+# station pulled the trip, and it matters for the two locations a rider cannot
+# park at. At 100 m the circles around neighbouring locations overlap (the
+# closest pair is 84 m apart), so every trip is attributed to its nearest
+# location and never counted twice.
+WIDE_RADIUS_M = 100.0
+
 
 def esc(s) -> str:
     return (str(s).replace("&", "&amp;").replace("<", "&lt;")
@@ -217,6 +225,22 @@ def build(out_path: Path) -> Path:
     supplied = float(chg.sessions["kwh"].sum())
     catered = 100.0 * supplied / need_total
     dock_rate = 100.0 * wdf["docked"].sum() / wdf["assessable"].sum()
+
+    # Same measure at the wider radius, computed here so both live side by side.
+    _dw = pd.DataFrame({
+        "week": df["week"].values,
+        "has_end": df["has_end"].values,
+        "wide": (np.stack([
+            np.where(np.isnan(S.haversine_m(s.lat, s.lon,
+                                            df["end_lat"].values, df["end_lon"].values)),
+                     np.inf,
+                     S.haversine_m(s.lat, s.lon,
+                                   df["end_lat"].values, df["end_lon"].values))
+            for s in sites]).min(axis=0) <= WIDE_RADIUS_M),
+    })
+    _gw = _dw.groupby("week").agg(assessable=("has_end", "sum"), wide=("wide", "sum"))
+    _gwf = S.full_periods(_gw, partial)
+    dock_rate_wide = 100.0 * _gwf["wide"].sum() / _gwf["assessable"].sum()
     veh_share = 100.0 * wvf["docked"].sum() / wvf["riding"].sum()
 
     ut = S.fleet_utilisation(df, "week")
@@ -228,6 +252,8 @@ def build(out_path: Path) -> Path:
     sup_wv = [float(sup_w.get(w, np.nan)) for w in wdf.index]
     cat_w = [100.0 * s / n if n else np.nan for s, n in zip(sup_wv, need_w)]
     dock_w = [float(wdf.loc[w, "dock_rate_pct"]) for w in wdf.index]
+    dock_w_wide = [100.0 * _gwf.loc[w, "wide"] / _gwf.loc[w, "assessable"]
+                   for w in wdf.index]
     vehs_w = [100.0 * wvf.loc[w, "docked"] / wvf.loc[w, "riding"] for w in wdf.index]
     unass_w = [float(wdf.loc[w, "unassessable_pct"]) for w in wdf.index]
     util_used = [float(utf.loc[w, "rides_per_vehicle_per_day"]) for w in wdf.index]
@@ -281,6 +307,17 @@ def build(out_path: Path) -> Path:
             d_ = S.haversine_m(m_.lat, m_.lon, _el, _eo)
             dmin = np.fmin(dmin, np.where(np.isnan(d_), np.inf, d_))
         ring_by_site[s.name] = int(((dmin > S.DOCK_RADIUS_M) & (dmin <= 150)).sum())
+
+    # Distance from every trip end to each site, then to the nearest one.
+    _site_d = np.stack([
+        np.where(np.isnan(S.haversine_m(s.lat, s.lon, _el, _eo)), np.inf,
+                 S.haversine_m(s.lat, s.lon, _el, _eo)) for s in sites])
+    _nearest = _site_d.argmin(axis=0)
+    _dmin = _site_d.min(axis=0)
+    wide_by_site = {s.name: int(((_nearest == i) & (_dmin <= WIDE_RADIUS_M)).sum())
+                    for i, s in enumerate(sites)}
+    near_by_site = {s.name: int(((_nearest == i) & (_dmin <= S.DOCK_RADIUS_M)).sum())
+                    for i, s in enumerate(sites)}
     by_name = {s.name: s for s in sites}
     site_rows = []
     for lbl, (_, row) in zip(site_lbl, pst.iterrows()):
@@ -292,6 +329,8 @@ def build(out_path: Path) -> Path:
             "n_racks": len(members),
             "points": sum(r.receptacles for r in members),
             "ends": int(row["buffer_ends"]),
+            "near": near_by_site[site.name],
+            "wide": wide_by_site[site.name],
             "kwh": float(sum(kwh_by_rack.get(r.rack_id, 0.0) for r in members)),
             "ring": ring_by_site[site.name],
         })
@@ -326,9 +365,10 @@ def build(out_path: Path) -> Path:
              f'our stations</div><div class="s">the other {swaps_share:.0f}% '
              f'still comes from swapping batteries by hand</div></div>')
     o.append(f'<div class="hero"><div class="n">{dock_rate:.0f} in 100</div>'
-             f'<div class="t">trips end at a station</div>'
-             f'<div class="s">the other {100 - dock_rate:.0f} end somewhere '
-             f'else in the city</div></div>')
+             f'<div class="t">trips end right at a station, within '
+             f'{S.DOCK_RADIUS_M:.0f} metres</div>'
+             f'<div class="s">{dock_rate_wide:.0f} in 100 if you count within '
+             f'{WIDE_RADIUS_M:.0f} metres</div></div>')
     o.append(f'<div class="hero"><div class="n">{veh_share:.0f}%</div>'
              f'<div class="t">of scooters visit a station in a given week</div>'
              f'<div class="s">so most of the fleet does reach a station at '
@@ -398,20 +438,33 @@ def build(out_path: Path) -> Path:
     # ---- docking ----------------------------------------------------------
     o.append('<div class="card">')
     o.append("<h2>Do people finish their trips at a station?</h2>")
-    o.append(f'<p class="lead">A trip counts as ending at a station if the '
-             f'scooter was left within {S.DOCK_RADIUS_M:.0f} metres of one.</p>')
+    o.append(f'<p class="lead">Measured two ways. Within '
+             f'{S.DOCK_RADIUS_M:.0f} metres means the scooter was left right at '
+             f'the rack. Within {WIDE_RADIUS_M:.0f} metres means it was left on '
+             f'the same corner, which is a fairer test of whether the station '
+             f'pulled the trip.</p>')
     o.append('<div class="chartttl">Share of trips ending at a station, each week</div>')
-    o.append(line_chart(wk_labels, [{"values": dock_w, "color": BLUE}],
-                        y_suffix="%", y_max=14, fmt=lambda v: f"{v:,.0f}",
+    o.append('<div class="legend">'
+             f'<span><i style="background:{ORANGE}"></i>Within '
+             f'{WIDE_RADIUS_M:.0f} metres</span>'
+             f'<span><i style="background:{BLUE}"></i>Within '
+             f'{S.DOCK_RADIUS_M:.0f} metres</span>'
+             "</div>")
+    o.append(line_chart(wk_labels,
+                        [{"values": dock_w_wide, "color": ORANGE},
+                         {"values": dock_w, "color": BLUE}],
+                        y_suffix="%", y_max=22, fmt=lambda v: f"{v:,.0f}",
                         band_from=shade_from,
                         band_note="less reliable, see note"))
     if shade_from is not None:
-        o.append(f'<div class="takeaway warn">Roughly '
-                 f'<strong>{dock_rate:.0f} trips in every 100</strong> end at a '
-                 f'station. The last few weeks look lower, but in those weeks a '
-                 f'lot more scooters did not report where they were parked. So '
-                 f'we cannot say whether docking actually fell. Treat the '
-                 f'shaded part as unknown, not as a drop.</div>')
+        o.append(f'<div class="takeaway warn">About <strong>{dock_rate:.0f} '
+                 f'trips in every 100</strong> end right at a rack, and '
+                 f'<strong>{dock_rate_wide:.0f} in 100</strong> end within '
+                 f'{WIDE_RADIUS_M:.0f} metres of one. The last few weeks look '
+                 f'lower on both lines, but in those weeks a lot more scooters '
+                 f'did not report where they were parked. So we cannot say '
+                 f'whether docking actually fell. Treat the shaded part as '
+                 f'unknown, not as a drop.</div>')
     o.append("</div>")
 
     # ---- stations ---------------------------------------------------------
@@ -431,22 +484,27 @@ def build(out_path: Path) -> Path:
              f'{S.MERGE_RADIUS_M:.0f} metres of another rack counts as one '
              f'location, because to a rider they are the same place. That '
              f'gives <strong>{len(sites)} locations</strong>, '
-             f'{merged_sites} of which are made up of more than one rack.</p>')
+             f'{merged_sites} of which are made up of more than one rack. '
+             f'Trips are counted against the nearest location, so nothing is '
+             f'counted twice where two locations sit close together.</p>')
     o.append("<table><thead><tr><th>Location</th><th>Racks in it</th>"
              "<th class='num'>Racks</th><th class='num'>Charging points</th>"
-             "<th class='num'>Trips ending here</th>"
+             f"<th class='num'>Trips within {S.DOCK_RADIUS_M:.0f} m</th>"
+             f"<th class='num'>Trips within {WIDE_RADIUS_M:.0f} m</th>"
              "<th class='num'>Energy given (kWh)</th></tr></thead><tbody>")
     for r in site_rows:
         o.append(f'<tr><td><strong>{esc(r["label"])}</strong></td>'
                  f'<td>{esc(r["rack_ids"])}</td>'
                  f'<td class="num">{r["n_racks"]}</td>'
                  f'<td class="num">{r["points"]}</td>'
-                 f'<td class="num">{r["ends"]:,}</td>'
+                 f'<td class="num">{r["near"]:,}</td>'
+                 f'<td class="num">{r["wide"]:,}</td>'
                  f'<td class="num">{r["kwh"]:,.0f}</td></tr>')
     o.append(f'<tr><td colspan="2"><strong>Total</strong></td>'
              f'<td class="num"><strong>{len(racks)}</strong></td>'
              f'<td class="num"><strong>{sum(r["points"] for r in site_rows)}</strong></td>'
-             f'<td class="num"><strong>{sum(r["ends"] for r in site_rows):,}</strong></td>'
+             f'<td class="num"><strong>{sum(r["near"] for r in site_rows):,}</strong></td>'
+             f'<td class="num"><strong>{sum(r["wide"] for r in site_rows):,}</strong></td>'
              f'<td class="num"><strong>{sum(r["kwh"] for r in site_rows):,.0f}</strong></td>'
              f'</tr>')
     o.append("</tbody></table>")
