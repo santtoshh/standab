@@ -2665,12 +2665,17 @@ def build_report(df: pd.DataFrame, poslog: pd.DataFrame, sites: list[Site],
                    f'a rider placed on a rack still arrived by rider even when '
                    f'no power moved, so the zero-energy rows belong here. The '
                    f'join is '
-                   f'<code>merge_asof(by=vehicle, direction=&quot;backward&quot;)</code> '
-                   f'on the vehicle&rsquo;s last ride-end before each session.</div>')
+                   f'<code>merge_asof(by=vehicle, direction=&quot;nearest&quot;)</code> '
+                   f'against the vehicle&rsquo;s closest ride-end in time, with a '
+                   f'symmetric window. A backward-only search undercounts by '
+                   f'about ten times: the rack registers the vehicle a minute or '
+                   f'two <em>before</em> the rider closes the rental, so looking '
+                   f'only backwards skips the ride that delivered the scooter and '
+                   f'matches the one before it.</div>')
 
         out.append('<div class="keyfind">')
-        out.append(f'<p class="lede">Riders park at the stations. They very '
-                   f'rarely put a vehicle on a rack. Of {fmt_int(len(cls))} dock '
+        out.append(f'<p class="lede">About a third of the docking is done by '
+                   f'riders. Of {fmt_int(len(cls))} dock '
                    f'or charge events, <strong>{fmt_pct(rider_pct)}</strong> '
                    f'({fmt_int(n_rider)}) '
                    f'follow the vehicle&rsquo;s own ride ending at that rack '
@@ -2685,16 +2690,17 @@ def build_report(df: pd.DataFrame, poslog: pd.DataFrame, sites: list[Site],
                    f'were followed by that vehicle being docked or charged at '
                    f'the same rack within {REVERSE_PLUG_WINDOW_MIN:.0f} minutes, '
                    f'and {fmt_pct(reverse_pct_charge)} drew power.</p>')
-        out.append(f'<p class="note">The remaining events are consistent with '
-                   f'operations staff collecting and docking vehicles: '
+        out.append(f'<p class="note">The rest is consistent with operations staff '
+                   f'collecting and docking vehicles: '
                    f'{fmt_pct(stale_4_24)} of events with a known preceding '
                    f'ride start 4 to 24 hours after it, and '
                    f'{fmt_pct(float(shares[GAP_BUCKET_LABELS[-1]]))} follow no '
-                   f'ride at all in the previous 24 hours. This is a description '
-                   f'of how the system is being used, not a verdict on it: the '
-                   f'stations are moving real energy '
-                   f'({fmt_1(total_supply_kwh)} kWh), just overwhelmingly through '
-                   f'a staffed workflow rather than a rider-facing one.</p>')
+                   f'ride at all in the previous 24 hours. So both routes are in '
+                   f'use: riders put roughly one vehicle in three on a rack '
+                   f'themselves, and staff bring in the remainder. This is a '
+                   f'description of how the system is used, not a verdict on it. '
+                   f'The stations moved {fmt_1(total_supply_kwh)} kWh either '
+                   f'way.</p>')
         out.append("</div>")
 
         pv_labels = period_labels(list(pv.index), "week")
