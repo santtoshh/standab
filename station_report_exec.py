@@ -146,7 +146,7 @@ def line_chart(labels: list[str], series: list[dict], *, y_suffix: str = "",
     return "".join(p)
 
 
-def funnel_chart(steps: list[dict]) -> str:
+def funnel_chart(steps: list[dict], *, share_label: str = "of the total above") -> str:
     """Stages on ONE shared scale, every bar measured against the first.
 
     Scaling each bar to the stage directly above it was tried and thrown out:
@@ -190,7 +190,7 @@ def funnel_chart(steps: list[dict]) -> str:
             p.append(f'<text x="{W}" y="{y + row_h / 2 + 2:.0f}" font-size="13.5" '
                      f'text-anchor="end" fill="{MUTED}" '
                      f'style="font-variant-numeric:tabular-nums">'
-                     f'{share:.1f}% of the trips above</text>')
+                     f'{share:.1f}% {esc(share_label)}</text>')
     p.append("</svg>")
     return "".join(p)
 
@@ -788,7 +788,7 @@ def build(out_path: Path) -> Path:
         {"label": "Took no charge",
          "value": n_docks_only,
          "note": "on a point but drew nothing", "color": MUTED},
-    ]))
+    ], share_label="of the times above"))
     o.append(f'<div class="takeaway"><strong>{n_charge_sessions:,}</strong> of '
              f'those, about {100.0 * n_charge_sessions / n_events:.0f} in every '
              f'100, drew power and together delivered the full '
