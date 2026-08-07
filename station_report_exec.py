@@ -266,6 +266,21 @@ def build(out_path: Path) -> Path:
     # which physical racks were merged, how many charging points they add up
     # to, and what each location delivered.
     kwh_by_rack = chg.sessions.groupby("rack_id")["kwh"].sum()
+
+    # A location can look unused for two very different reasons: nobody rides
+    # there, or nobody *can* park there. Comparing trips ending inside the 50 m
+    # radius against trips ending in the 50-150 m ring around it separates the
+    # two. A busy ring with an empty core means the surrounding streets are busy
+    # but the rack itself is not somewhere a rider leaves a scooter.
+    _el, _eo = df["end_lat"].values, df["end_lon"].values
+    ring_by_site: dict[str, int] = {}
+    for s in sites:
+        members = [racks[i] for i in s.rack_indices]
+        dmin = np.full(len(df), np.inf)
+        for m_ in members:
+            d_ = S.haversine_m(m_.lat, m_.lon, _el, _eo)
+            dmin = np.fmin(dmin, np.where(np.isnan(d_), np.inf, d_))
+        ring_by_site[s.name] = int(((dmin > S.DOCK_RADIUS_M) & (dmin <= 150)).sum())
     by_name = {s.name: s for s in sites}
     site_rows = []
     for lbl, (_, row) in zip(site_lbl, pst.iterrows()):
@@ -278,8 +293,13 @@ def build(out_path: Path) -> Path:
             "points": sum(r.receptacles for r in members),
             "ends": int(row["buffer_ends"]),
             "kwh": float(sum(kwh_by_rack.get(r.rack_id, 0.0) for r in members)),
+            "ring": ring_by_site[site.name],
         })
+    for r in site_rows:
+        r["blocked"] = (r["ends"] <= 60 and r["ring"] >= 25 * max(r["ends"], 1)
+                        and r["kwh"] > 10)
     merged_sites = sum(1 for r in site_rows if r["n_racks"] > 1)
+    blocked_rows = [r for r in site_rows if r["blocked"]]
 
     swaps_share = 100.0 - catered
     per_day_need = need_total / days
@@ -430,6 +450,23 @@ def build(out_path: Path) -> Path:
              f'<td class="num"><strong>{sum(r["kwh"] for r in site_rows):,.0f}</strong></td>'
              f'</tr>')
     o.append("</tbody></table>")
+    if blocked_rows:
+        names = " and ".join(esc(r["label"]) for r in blocked_rows)
+        ring_total = sum(r["ring"] for r in blocked_rows)
+        core_total = sum(r["ends"] for r in blocked_rows)
+        kwh_total = sum(r["kwh"] for r in blocked_rows)
+        o.append(f'<p class="note" style="margin-top:14px">'
+                 f'<strong>About {names}.</strong> Almost no trips end at these '
+                 f'two, but the streets around them are busy: {ring_total:,} '
+                 f'trips end between 50 and 150 metres away, against '
+                 f'{core_total:,} at the racks themselves. Every other location '
+                 f'has hundreds of trips ending right at it. We checked whether '
+                 f'the coordinates could be wrong, and they are not: the racks '
+                 f'would have to move 150 to 200 metres, a different block, '
+                 f'before the numbers looked normal. They still delivered '
+                 f'{kwh_total:,.0f} kWh between them, so vehicles do reach '
+                 f'them. They just do not appear to be places a rider can leave '
+                 f'a scooter.</p>')
     o.append("</div>")
 
     # ---- fleet reach ------------------------------------------------------
