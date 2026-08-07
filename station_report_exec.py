@@ -7,9 +7,10 @@ two reports can never drift apart. What differs is the audience: this one is
 written for people who were not in the data meeting, drops all methodology,
 and puts one sentence of meaning under every chart.
 
-Scope is deliberately limited to what the meeting asked for:
-  energy needed vs supplied · share of demand catered · utilisation ·
-  docking success over time · who is actually docking · which stations work ·
+Scope is deliberately limited to what the meeting asked for, and to figures
+that are directly measured rather than inferred:
+  energy needed vs supplied · share of demand catered ·
+  docking success over time · which stations work ·
   scooters using a station each week
 
 Usage:
@@ -154,35 +155,6 @@ def bar_chart(labels: list[str], values: list[float], *, color: str = BLUE,
     return "".join(p)
 
 
-def split_bar(parts: list[tuple[str, float, str]]) -> str:
-    """One horizontal 100% bar. For a single share, this beats a pie: it is
-    read as a length, and the labels sit outside the marks."""
-    total = sum(v for _, v, _ in parts) or 1
-    p = ['<svg viewBox="0 0 900 116" role="img" style="width:100%;height:auto">']
-    x = 0.0
-    for name, v, colour in parts:
-        w = 900 * v / total
-        p.append(f'<rect x="{x:.1f}" y="0" width="{max(w - 2, 1):.1f}" height="46" '
-                 f'fill="{colour}" rx="4"/>')
-        if w > 120:
-            p.append(f'<text x="{x + 14:.1f}" y="30" font-size="17" font-weight="700" '
-                     f'fill="#ffffff">{v / total * 100:.0f}%</text>')
-        x += w
-    x = 0.0
-    for i, (name, v, colour) in enumerate(parts):
-        w = 900 * v / total
-        anchor, tx = ("start", x) if w > 120 else ("start", x)
-        ty = 74 + (i % 2) * 26          # stagger so short segments keep a label
-        p.append(f'<rect x="{tx:.1f}" y="{ty - 11:.1f}" width="11" height="11" '
-                 f'fill="{colour}" rx="2"/>')
-        p.append(f'<text x="{tx + 17:.1f}" y="{ty:.1f}" font-size="14" '
-                 f'fill="{INK2}" text-anchor="{anchor}">{esc(name)} '
-                 f'&mdash; {v / total * 100:.0f}%</text>')
-        x += w
-    p.append("</svg>")
-    return "".join(p)
-
-
 CSS = """
 *{box-sizing:border-box}
 body{margin:0;background:#f4f3ef;color:#111;font:16px/1.6 -apple-system,BlinkMacSystemFont,
@@ -245,11 +217,6 @@ def build(out_path: Path) -> Path:
     dock_rate = 100.0 * wdf["docked"].sum() / wdf["assessable"].sum()
     veh_share = 100.0 * wvf["docked"].sum() / wvf["riding"].sum()
 
-    poslog = S.position_log(raw)
-    cls = S.classify_sessions(chg, poslog)
-    ex = cls[~cls["rack_id"].isin(S.DEPOT_RACK_IDS)]
-    rider_pct = 100.0 * float(ex["rider_docked"].mean())
-
     sup_w = S.charging_by_gran(chg, "week")
     wk_labels = [w.strftime("%-d %b") for w in wdf.index]
     need_w = [S.energy_need_kwh(int(wdf.loc[w, "rides"])) for w in wdf.index]
@@ -303,9 +270,10 @@ def build(out_path: Path) -> Path:
              f'<div class="t">of scooters visit a station in a given week</div>'
              f'<div class="s">so most of the fleet does reach a station '
              f'sometimes</div></div>')
-    o.append(f'<div class="hero"><div class="n">{rider_pct:.0f} in 100</div>'
-             f'<div class="t">charges are plugged in by a rider</div>'
-             f'<div class="s">staff do the rest &mdash; see below</div></div>')
+    o.append(f'<div class="hero"><div class="n">{supplied:,.0f} kWh</div>'
+             f'<div class="t">charged at the stations so far</div>'
+             f'<div class="s">enough energy for about '
+             f'{supplied * 1000 / S.WH_PER_RIDE / 1000:,.0f},000 trips</div></div>')
     o.append("</div>")
 
     # ---- energy -----------------------------------------------------------
@@ -358,20 +326,6 @@ def build(out_path: Path) -> Path:
                  f'shaded part as unknown, not as a decline.</div>')
     o.append("</div>")
 
-    # ---- who docks --------------------------------------------------------
-    o.append('<div class="card">')
-    o.append("<h2>Who actually plugs the scooters in?</h2>")
-    o.append(f'<p class="lead">Of the {len(ex):,} charges at our stations, we '
-             f'checked whether a rider had just ridden the scooter there.</p>')
-    o.append(split_bar([("Rider rode there and plugged in", rider_pct, GREEN),
-                        ("Staff collected and plugged in", 100 - rider_pct, BLUE)]))
-    o.append(f'<div class="takeaway warn">Almost all charging is done by '
-             f'<strong>our own staff</strong>, not by riders. The stations are '
-             f'working as a place for the team to charge scooters efficiently &mdash; '
-             f'they are not yet changing where riders choose to leave them. '
-             f'That is the single biggest opportunity in this pilot.</div>')
-    o.append("</div>")
-
     # ---- stations ---------------------------------------------------------
     o.append('<div class="card">')
     o.append("<h2>Which stations are being used?</h2>")
@@ -391,18 +345,18 @@ def build(out_path: Path) -> Path:
     o.append(line_chart(wk_labels, [{"values": vehs_w, "color": GREEN}],
                         y_suffix="%", y_max=100, fmt=lambda v: f"{v:,.0f}"))
     o.append(f'<div class="takeaway good">About <strong>{veh_share:.0f}% of '
-             f'scooters</strong> touch a station in a normal week. The network '
-             f'reaches a good part of the fleet; what is missing is riders '
-             f'plugging in when they arrive.</div>')
+             f'scooters</strong> touch a station in a normal week, so the '
+             f'network already reaches a good part of the fleet. The gap is '
+             f'how often trips actually <em>finish</em> there.</div>')
     o.append("</div>")
 
     # ---- what to do -------------------------------------------------------
     o.append('<div class="card">')
     o.append("<h2>What this suggests</h2>")
     o.append('<ul class="acts">')
-    o.append(f"<li><strong>Give riders a reason to plug in.</strong> Only "
-             f"{rider_pct:.0f} in 100 charges come from a rider. A small "
-             f"in-app incentive for ending a trip plugged in is the cheapest "
+    o.append(f"<li><strong>Give riders a reason to finish at a station.</strong> "
+             f"Only {dock_rate:.0f} trips in 100 end at one today. A small "
+             f"in-app incentive for ending a trip at a station is the cheapest "
              f"way to move every other number on this page.</li>")
     o.append(f"<li><strong>The stations already pay their way operationally.</strong> "
              f"They cover {catered:.0f}% of the fleet&rsquo;s energy, which is "
@@ -430,7 +384,7 @@ def build(out_path: Path) -> Path:
     print(f"  energy catered    : {catered:.1f}%  ({supplied:,.0f} of {need_total:,.0f} kWh)")
     print(f"  docking rate      : {dock_rate:.1f}%")
     print(f"  weekly reach      : {veh_share:.1f}%")
-    print(f"  rider-plugged     : {rider_pct:.1f}%")
+    print(f"  energy supplied   : {supplied:,.0f} kWh")
     print(f"  wrote             : {out_path}  ({out_path.stat().st_size:,} bytes)")
     return out_path
 
