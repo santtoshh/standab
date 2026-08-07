@@ -620,11 +620,10 @@ def build(out_path: Path) -> Path:
              f'<div class="s">counted against the scooters that rode that '
              f'week</div></div>')
     o.append(f'<div class="hero"><div class="n">{cov_pct:.0f}%</div>'
-             f'<div class="t">of the energy needed by the scooters that do use '
-             f'our stations comes from the stations</div>'
+             f'<div class="t">of the energy used by scooters that reach a '
+             f'station comes from us</div>'
              f'<div class="s">against {cov_fleet_pct:.0f}% across the whole '
-             f'fleet, so reaching a station is not the same as being charged '
-             f'by one</div></div>')
+             f'fleet</div></div>')
     o.append(f'<div class="hero"><div class="n">{supplied:,.0f} kWh</div>'
              f'<div class="t">charged at the stations so far</div>'
              f'<div class="s">enough energy for about '
@@ -634,11 +633,10 @@ def build(out_path: Path) -> Path:
     # ---- energy -----------------------------------------------------------
     o.append('<div class="card">')
     o.append("<h2>Energy: what the scooters need vs what the stations give</h2>")
-    o.append(f'<p class="lead">Assuming every trip uses about '
-             f'{S.WH_PER_RIDE} Wh of battery, across {days} days the fleet '
-             f'needed roughly <strong>{need_total:,.0f} kWh</strong>. The '
-             f'stations delivered <strong>{supplied:,.0f} kWh</strong> of '
-             f'it.</p>')
+    o.append(f'<p class="lead">Assuming {S.WH_PER_RIDE} Wh per trip, the '
+             f'fleet needed about <strong>{need_total:,.0f} kWh</strong> over '
+             f'the {days} days. The stations delivered '
+             f'<strong>{supplied:,.0f} kWh</strong> of it.</p>')
     o.append('<div class="chartttl">Each week, in kilowatt-hours</div>')
     o.append('<div class="legend">'
              f'<span><i style="background:{BLUE}"></i>Energy the scooters needed</span>'
@@ -648,15 +646,13 @@ def build(out_path: Path) -> Path:
                         [{"values": need_w, "color": BLUE},
                          {"values": sup_wv, "color": ORANGE}],
                         y_suffix="", fmt=lambda v: f"{v:,.0f}"))
-    o.append(f'<div class="takeaway">The gap between the two lines is energy we '
-             f'still handle by swapping batteries. That is about '
-             f'<strong>{per_day_need - per_day_sup:,.0f} kWh a day</strong>.</div>')
-
-    o.append(f'<div class="takeaway">The orange line is almost flat. Once the '
-             f'stations were fully running they gave out about the same energy '
-             f'every week, between {min(sup_full):,.0f} and '
-             f'{max(sup_full):,.0f} kWh. What the fleet needs swings a lot '
-             f'more, from {min(need_w):,.0f} to {max(need_w):,.0f} kWh.</div>')
+    o.append(f'<div class="takeaway">The gap is energy we still handle by '
+             f'swapping batteries, about '
+             f'<strong>{per_day_need - per_day_sup:,.0f} kWh a day</strong>. '
+             f'Note how flat the orange line is. The stations gave out between '
+             f'{min(sup_full):,.0f} and {max(sup_full):,.0f} kWh every week '
+             f'while demand swung from {min(need_w):,.0f} to '
+             f'{max(need_w):,.0f} kWh.</div>')
 
     # ---- where the fleet's energy comes from --------------------------------
     swaps_kwh = need_total - supplied
@@ -682,12 +678,10 @@ def build(out_path: Path) -> Path:
     o.append('<div class="card">')
     o.append("<h2>How much energy do the scooters that use our stations get "
              "from us?</h2>")
-    o.append(f'<p class="lead">The 31% above counts the whole fleet, including '
-             f'scooters that never go near a rack. A fairer question is how '
-             f'well we serve the scooters that <em>do</em> use the stations. '
-             f'Each week we take the scooters that ended at least one trip at a '
-             f'station, then compare the energy <em>those</em> scooters needed '
-             f'with what the stations actually gave <em>them</em>.</p>')
+    o.append(f'<p class="lead">The {catered:.0f}% above counts the whole fleet, '
+             f'including scooters that never go near a rack. This asks a fairer '
+             f'question: for the scooters that do reach a station in a given '
+             f'week, how much of <em>their</em> energy came from us?</p>')
     o.append('<div class="chartttl">Share of their energy that came from our stations</div>')
     o.append(compare_bars([
         {"label": "Scooters that visit a station", "value": cov_pct, "color": GREEN},
@@ -859,22 +853,18 @@ def build(out_path: Path) -> Path:
     o.append(f'<div class="takeaway"><strong>{live_sites} of {len(sites)}</strong> '
              f'locations take real traffic here, and the busiest three take a '
              f'large share of it. The two flat bars are not idle hardware. '
-             f'{_near_lbl} stands {_near_gap:.0f} metres from {_near_to}, and '
-             f'because every trip counts only against its closest location, '
-             f'the neighbour takes most of the trips that end near it. '
-             f'{_depot_lbl} is the yard rack: vehicles are delivered there by '
-             f'van rather than ridden there, which is why it shows almost no '
-             f'trips but {_depot_kwh:.0f} kWh of charging.</div>')
+             f'{_near_lbl} sits {_near_gap:.0f} metres from {_near_to} and '
+             f'loses its trips to the closer location. {_depot_lbl} is the yard '
+             f'rack, where vehicles arrive by van rather than being ridden '
+             f'in.</div>')
 
     o.append("<h3>How the racks group into locations</h3>")
-    o.append(f'<p class="note">We have {len(racks)} racks in the city, but some '
-             f'sit right next to each other. Anything within '
-             f'{S.MERGE_RADIUS_M:.0f} metres of another rack counts as one '
-             f'location, because to a rider they are the same place. That '
-             f'gives <strong>{len(sites)} locations</strong>, '
-             f'{merged_sites} of which are made up of more than one rack. '
-             f'Trips are counted against the nearest location, so nothing is '
-             f'counted twice where two locations sit close together.</p>')
+    o.append(f'<p class="note">Some of the {len(racks)} racks stand within a '
+             f'few metres of each other, so anything within '
+             f'{S.MERGE_RADIUS_M:.0f} metres of another counts as one location. '
+             f'That gives <strong>{len(sites)} locations</strong>, '
+             f'{merged_sites} of them with more than one rack. Each trip counts '
+             f'against its nearest location only.</p>')
     o.append('<div class="tablewrap">')
     o.append("<table><thead><tr><th>Location</th><th>Racks in it</th>"
              "<th class='num'>Racks</th><th class='num'>Charging points</th>"
@@ -905,10 +895,10 @@ def build(out_path: Path) -> Path:
     o.append('<div class="chartttl">Share of scooters in use that visited a station that week</div>')
     o.append(line_chart(wk_labels, [{"values": vehs_w, "color": GREEN}],
                         y_suffix="%", y_max=100, fmt=lambda v: f"{v:,.0f}"))
-    o.append(f'<div class="takeaway good">About <strong>{veh_share:.0f}% of '
-             f'scooters</strong> reach a station in a normal week. The network '
-             f'already covers a good part of the fleet. The gap is how often '
-             f'trips actually <em>finish</em> there.</div>')
+    o.append(f'<div class="takeaway good">About <strong>{veh_share:.0f}%</strong> '
+             f'of the scooters that rode in a given week reached a station that '
+             f'week. Reaching one is not the same as finishing a trip '
+             f'there.</div>')
     o.append("</div>")
 
     # ---- summary of findings (statements of fact, no recommendations) ------
@@ -916,35 +906,32 @@ def build(out_path: Path) -> Path:
     o.append("<h2>What the numbers show</h2>")
     o.append('<ul class="acts">')
     o.append(f"<li><strong>The stations cover {catered:.0f}% of the "
-             f"fleet&rsquo;s energy.</strong> The remaining "
-             f"{swaps_share:.0f}% is still handled by swapping batteries by "
-             f"hand, which works out at about "
+             f"fleet&rsquo;s energy.</strong> The other {swaps_share:.0f}% is "
+             f"still swapped by hand, about "
              f"{per_day_need - per_day_sup:,.0f} kWh a day.</li>")
     o.append(f"<li><strong>Coverage drops when the city is busiest.</strong> "
              f"The stations delivered a similar amount of energy every week "
              f"while demand moved, so their share fell to {busy_cat:.0f}% in "
              f"the busiest week against "
              f"{min(c for c in cat_w if c != busy_cat):.0f}% to "
-             f"{max(cat_w):.0f}% in the others.</li>")
+             f"{max(cat_w):.0f}% in the rest.</li>")
     o.append(f"<li><strong>{dock_rate:.1f} trips in 100 end at a station.</strong> "
              f"Measured over the six full weeks, on the trips that reported "
              f"where they ended. The rest finish elsewhere in the city.</li>")
     o.append(f"<li><strong>About one in four of those goes on a charging "
-             f"point.</strong> Of the {ft['ends']:,} trips that end within "
-             f"{S.DOCK_RADIUS_M:.0f} metres of a station, "
-             f"{ft30['docked_or_charged_pct']:.1f}% see that scooter docked or "
-             f"charged at that same station within 30 minutes, and "
-             f"{ft30['charged_pct']:.1f}% draw power. The rest are left beside "
-             f"the rack.</li>")
+             f"point.</strong> Of the {ft['ends']:,} trips ending at a station, "
+             f"{ft30['docked_or_charged_pct']:.1f}% put the scooter on a point "
+             f"within 30 minutes and {ft30['charged_pct']:.1f}% drew power. The "
+             f"rest are left beside the rack.</li>")
     o.append(f"<li><strong>{veh_share:.0f}% of the scooters that rode in a "
              f"given week reached a station that week.</strong> Over the whole "
              f"period {_ever_pct:.0f}% of the fleet reached one at least "
              f"once.</li>")
-    o.append(f"<li><strong>Even the scooters that use a station get "
-             f"{cov_pct:.0f}% of their energy from us.</strong> Over the six "
-             f"full weeks those scooters needed {cov_need:,.0f} kWh and the "
-             f"stations gave them {cov_given:,.0f} kWh, against "
-             f"{cov_fleet_pct:.0f}% for the whole fleet.</li>")
+    o.append(f"<li><strong>Even scooters that reach a station get only "
+             f"{cov_pct:.0f}% of their energy from us.</strong> They needed "
+             f"{cov_need:,.0f} kWh across the six full weeks and the stations "
+             f"gave {cov_given:,.0f} kWh, against {cov_fleet_pct:.0f}% "
+             f"fleet-wide.</li>")
     _top3_kwh = sum(r["kwh"] for r in sorted(site_rows, key=lambda r: -r["kwh"])[:3])
     o.append(f"<li><strong>Use is concentrated in a few locations.</strong> "
              f"{live_sites} of {len(sites)} sites take real traffic. The three "
