@@ -1647,13 +1647,48 @@
         setConfirmBtnLoading(true);
         showOverlay(
           'Generating your report',
-          'Running the analysis notebook with your confirmed mapping. This usually takes 30 seconds to a few minutes.'
+          'Running the analysis notebook with your confirmed mapping. Small files take under a minute; large exports can take ten minutes or more. Keep this tab open.'
         );
 
         try {
           const fd = new FormData();
           fd.append('payload', JSON.stringify(payload));
           const resp = await fetch('/generate', { method: 'POST', body: fd });
+
+          if (resp.status === 202) {
+            // The report is generated in the background; poll until it is ready, then download it.
+            const job = await resp.json();
+            const t0 = Date.now();
+            while (true) {
+              await new Promise(r => setTimeout(r, 3000));
+              let st = null;
+              try {
+                const s = await fetch(job.status_url, { cache: 'no-store' });
+                if (s.ok) st = await s.json();
+              } catch (e) { st = null; }
+              const el = Math.round((Date.now() - t0) / 1000);
+              showOverlay(
+                'Generating your report',
+                `Running the analysis notebook: ${Math.floor(el / 60)} min ${el % 60} s so far. Large exports can take ten minutes or more; keep this tab open.`
+              );
+              if (!st) continue;
+              if (st.status === 'done') {
+                const r = await fetch(job.result_url);
+                if (!r.ok) throw new Error('the finished report could not be downloaded');
+                const blob = await r.blob();
+                triggerDownload(blob, filenameFromHeader(r.headers.get('Content-Disposition'), st.download_name || 'standab-analysis.html'));
+                hideOverlay();
+                setConfirmBtnLoading(false);
+                return;
+              }
+              if (st.status === 'error' || st.status === 'unknown') {
+                hideOverlay();
+                setConfirmBtnLoading(false);
+                showMapError('The report could not be generated. ' + (st.message || '') + (st.details ? ' Details: ' + String(st.details).slice(0, 800) : ''));
+                return;
+              }
+            }
+          }
 
           if (!resp.ok) {
             const html = await resp.text();

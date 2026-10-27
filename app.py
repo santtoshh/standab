@@ -23,6 +23,7 @@ import os
 import re
 import shutil
 import tempfile
+import threading
 import time
 import uuid
 from datetime import datetime
@@ -74,6 +75,32 @@ def _sanitize_stem(raw: str) -> str:
     """Filename-safe version of the uploaded file's stem (no extension)."""
     cleaned = re.sub(r"[^A-Za-z0-9_-]+", "_", (raw or "").strip()).strip("_-")
     return cleaned[:60]
+
+
+# ---------------------------------------------------------------------------
+# Background jobs: the notebook runs in a thread so the HTTP request returns
+# at once and the page polls /status/<job>. Long runs no longer hit the proxy's
+# request timeout, which surfaced to users as "upstream error".
+# ---------------------------------------------------------------------------
+JOBS: dict[str, dict] = {}
+JOBS_LOCK = threading.Lock()
+
+
+def _job_set(job_id: str, **fields) -> None:
+    with JOBS_LOCK:
+        JOBS.setdefault(job_id, {}).update(fields)
+
+
+def _job_get(job_id: str) -> dict:
+    with JOBS_LOCK:
+        return dict(JOBS.get(job_id) or {})
+
+
+def _job_gc(now: float | None = None) -> None:
+    cutoff = (now if now is not None else time.time()) - JOB_TTL_SEC
+    with JOBS_LOCK:
+        for key in [k for k, v in JOBS.items() if v.get("started", 0) < cutoff]:
+            JOBS.pop(key, None)
 
 
 def _sanitize_job_id(raw: str) -> str | None:
@@ -281,7 +308,16 @@ def index():
 
 @app.route("/health", methods=["GET"])
 def health():
-    return {"status": "ok"}
+    info = {"status": "ok"}
+    try:
+        lim = Path("/sys/fs/cgroup/memory.max").read_text().strip()
+        info["memory_limit_mb"] = None if lim == "max" else round(int(lim) / 1e6)
+        info["memory_used_mb"] = round(int(Path("/sys/fs/cgroup/memory.current").read_text().strip()) / 1e6)
+    except Exception:
+        pass
+    with JOBS_LOCK:
+        info["jobs_running"] = sum(1 for v in JOBS.values() if v.get("status") == "running")
+    return jsonify(info)
 
 
 @app.route("/preview", methods=["POST"])
@@ -592,6 +628,54 @@ def generate():
         workdir,
     )
 
+    download_name = _build_download_name(original_filenames)
+    sync = request.args.get("sync") == "1" or request.form.get("sync") == "1"
+    if sync:
+        try:
+            output_html = _run_notebook(
+                rides_paths,
+                workdir,
+                parking_path=parking_path,
+                parking_label=parking_label,
+            )
+            with open(output_html, "rb") as fh:
+                blob = fh.read()
+            return send_file(
+                io.BytesIO(blob),
+                mimetype="text/html",
+                as_attachment=True,
+                download_name=download_name,
+            )
+        except CellExecutionError as exc:
+            log.exception("job=%s notebook execution failed", job_id)
+            return _render_error(job_id, "The analysis notebook raised an error while processing your data.", _trim(str(exc)), http_status=500)
+        except Exception as exc:
+            log.exception("job=%s failed", job_id)
+            return _render_error(job_id, "Unexpected server error while generating the report.", str(exc), http_status=500)
+        finally:
+            shutil.rmtree(workdir, ignore_errors=True)
+
+    _job_gc()
+    _job_set(job_id, status="running", started=time.time(), download_name=download_name, workdir=str(workdir))
+    worker = threading.Thread(
+        target=_run_job,
+        args=(job_id, rides_paths, workdir, parking_path, parking_label),
+        daemon=True,
+        name=f"standab-job-{job_id}",
+    )
+    worker.start()
+    return (
+        jsonify({"job_id": job_id, "status": "running", "status_url": f"/status/{job_id}", "result_url": f"/result/{job_id}"}),
+        202,
+    )
+
+
+def _trim(text: str, keep: int = 2000) -> str:
+    return text if len(text) <= 2 * keep else text[:keep] + "\n...[truncated]...\n" + text[-keep:]
+
+
+def _run_job(job_id, rides_paths, workdir, parking_path, parking_label):
+    """Run the notebook for a job in the background and record the outcome."""
     try:
         output_html = _run_notebook(
             rides_paths,
@@ -599,37 +683,49 @@ def generate():
             parking_path=parking_path,
             parking_label=parking_label,
         )
-        with open(output_html, "rb") as fh:
-            blob = fh.read()
-        download_name = _build_download_name(original_filenames)
-        response = send_file(
-            io.BytesIO(blob),
-            mimetype="text/html",
-            as_attachment=True,
-            download_name=download_name,
-        )
-        return response
+        try:
+            os.utime(workdir, None)          # keep the result for a full TTL from completion
+        except OSError:
+            pass
+        _job_set(job_id, status="done", finished=time.time(), output=str(output_html))
+        log.info("job=%s done: %s (%.1f MB)", job_id, output_html, Path(output_html).stat().st_size / 1e6)
     except CellExecutionError as exc:
         log.exception("job=%s notebook execution failed", job_id)
-        snippet = str(exc)
-        if len(snippet) > 4000:
-            snippet = snippet[:2000] + "\n...[truncated]...\n" + snippet[-2000:]
-        return _render_error(
-            job_id,
-            "The analysis notebook raised an error while processing your data.",
-            snippet,
-            http_status=500,
-        )
+        _job_set(job_id, status="error", finished=time.time(), message="The analysis notebook raised an error while processing your data.", details=_trim(str(exc)))
+        shutil.rmtree(workdir, ignore_errors=True)
     except Exception as exc:
         log.exception("job=%s failed", job_id)
-        return _render_error(
-            job_id,
-            "Unexpected server error while generating the report.",
-            str(exc),
-            http_status=500,
-        )
-    finally:
+        msg = "The notebook kernel died, most likely out of memory on this server. A smaller or shorter export, or the local runner, will work." if "Kernel died" in str(exc) or "DeadKernel" in type(exc).__name__ else "Unexpected server error while generating the report."
+        _job_set(job_id, status="error", finished=time.time(), message=msg, details=str(exc))
         shutil.rmtree(workdir, ignore_errors=True)
+
+
+@app.route("/status/<job_id>", methods=["GET"])
+def job_status(job_id: str):
+    jid = _sanitize_job_id(job_id)
+    job = _job_get(jid) if jid else {}
+    if not job:
+        return jsonify({"status": "unknown", "message": "No such job, or it has expired."}), 404
+    now = time.time()
+    return jsonify({
+        "job_id": jid,
+        "status": job.get("status"),
+        "elapsed_s": int((job.get("finished") or now) - job.get("started", now)),
+        "message": job.get("message"),
+        "details": job.get("details"),
+        "download_name": job.get("download_name"),
+    })
+
+
+@app.route("/result/<job_id>", methods=["GET"])
+def job_result(job_id: str):
+    jid = _sanitize_job_id(job_id)
+    job = _job_get(jid) if jid else {}
+    if not job:
+        return _render_error(jid, "No such job, or it has expired.", "Reports are kept for an hour after they are generated.", http_status=404)
+    if job.get("status") != "done" or not job.get("output") or not Path(job["output"]).exists():
+        return _render_error(jid, "The report is not ready.", f"Job status: {job.get('status')}.", http_status=409)
+    return send_file(job["output"], mimetype="text/html", as_attachment=True, download_name=job.get("download_name") or "standab-analysis.html")
 
 
 def _render_error(job_id: str | None, message: str, details: str, http_status: int):
