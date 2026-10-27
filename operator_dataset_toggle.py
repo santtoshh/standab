@@ -1331,6 +1331,18 @@ def build_payload(
     except Exception:
         dataset_days = 0
 
+    # mean position of the ride ends inside each hex over the whole dataset, for the ride-end centre export
+    end_mean: dict = {}
+    try:
+        if {"end_h3", "end_lat", "end_lng"} <= set(df_rides.columns):
+            _em = (
+                df_rides.dropna(subset=["end_h3", "end_lat", "end_lng"])
+                .groupby("end_h3")
+                .agg(lat=("end_lat", "mean"), lng=("end_lng", "mean"), n=("end_lat", "size"))
+            )
+            end_mean = {str(k): (float(v.lat), float(v.lng), int(v.n)) for k, v in _em.iterrows()}
+    except Exception:
+        end_mean = {}
     for _, row in df_draw.iterrows():
         hx = row.get("h3")
         if hx is None or (isinstance(hx, float) and np.isnan(hx)):
@@ -1345,6 +1357,9 @@ def build_payload(
             "h3": str(hx),
             "center_lat": float(centre_lat),
             "center_lng": float(centre_lng),
+            "end_mean_lat": end_mean.get(str(hx), (None, None, None))[0],
+            "end_mean_lng": end_mean.get(str(hx), (None, None, None))[1],
+            "end_n": end_mean.get(str(hx), (None, None, None))[2],
             "rank": None
             if (
                 isinstance(metrics.get("rank", None), float)
